@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+data/habits.db
+data/spelling.db
+data/*.db
+data/spelling_audio/
+data/*.pdf
+.pytest_cache/
+.DS_Store
+text.txt
+web/node_modules/
+web/dist/

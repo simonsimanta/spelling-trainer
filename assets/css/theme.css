@@ -1,0 +1,88 @@
+:root {
+  --radius: 14px;
+  --surface: #ffffff;
+  --border-soft: #e9edf5;
+  --shadow-soft: 0 10px 28px rgba(15, 23, 42, 0.06);
+}
+
+.main .block-container {
+  padding-top: 1.5rem;
+  padding-bottom: 2rem;
+}
+
+h1, h2, h3 {
+  letter-spacing: 0.2px;
+}
+
+div[data-testid="stMetricValue"] {
+  font-weight: 700;
+}
+
+div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stForm"]) {
+  border-radius: var(--radius);
+}
+
+div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stMarkdownContainer"] > h3) {
+  border-radius: var(--radius);
+}
+
+div[data-testid="stAlert"] {
+  border-radius: var(--radius);
+}
+
+div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {
+  border-radius: var(--radius);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-soft);
+  background: var(--surface);
+}
+
+div[data-testid="stButton"] > button,
+div[data-testid="stFormSubmitButton"] > button {
+  border-radius: 12px;
+  min-height: 2.8rem;
+  font-weight: 600;
+}
+
+div[data-baseweb="select"] > div,
+div[data-testid="stDateInput"] input,
+div[data-testid="stTextInput"] input,
+textarea {
+  border-radius: 12px !important;
+}
+
+button[kind="primary"] {
+  box-shadow: 0 8px 20px rgba(255, 75, 75, 0.18);
+}
+
+button[kind="secondary"] {
+  border-color: #dbe3f0;
+}
+
+div[data-testid="stTabs"] button {
+  border-radius: 12px 12px 0 0;
+  font-weight: 600;
+}
+
+.audio-shell {
+  background: #f7f9fc;
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  padding: 0.65rem 0.8rem;
+}
+
+.spelling-diff-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.35rem 0 0.75rem;
+}
+
+.spelling-diff-chip {
+  border: 1px solid #f1c7c7;
+  background: #fff5f5;
+  color: #8a1f1f;
+  border-radius: 999px;
+  padding: 0.28rem 0.65rem;
+  font-size: 0.9rem;
+}

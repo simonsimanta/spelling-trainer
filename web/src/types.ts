@@ -74,6 +74,7 @@ export type Dashboard = {
     forced_correction_words: number;
     practice_queue_words: number;
     dictation_ready_words: number;
+    diagnostic_ready_words: number;
     diagnostic_tested_words: number;
     diagnostic_missed_words: number;
     diagnostic_accuracy: number;

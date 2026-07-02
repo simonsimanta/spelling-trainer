@@ -75,6 +75,7 @@ def test_spelling_only_public_app_and_dashboard() -> None:
         "forced_correction_words",
         "practice_queue_words",
         "dictation_ready_words",
+        "diagnostic_ready_words",
         "diagnostic_tested_words",
         "diagnostic_missed_words",
         "diagnostic_accuracy",
@@ -101,6 +102,7 @@ def test_spelling_only_public_app_and_dashboard() -> None:
     assert stats["oxford_target_words"] == 5000
     assert stats["oxford_loaded_words"] == 4
     assert stats["practice_queue_words"] == 0
+    assert stats["diagnostic_ready_words"] == 19
     assert stats["diagnostic_tested_words"] == 0
     assert stats["diagnostic_missed_words"] == 0
     assert stats["diagnostic_accuracy"] == 0.0
@@ -441,6 +443,7 @@ def test_diagnostic_session_creates_personal_practice_priority() -> None:
     dashboard = client.get("/dashboard").json()["stats"]
     assert dashboard["diagnostic_tested_words"] == 1
     assert dashboard["diagnostic_missed_words"] == 1
+    assert dashboard["diagnostic_ready_words"] == 18
     assert dashboard["diagnostic_accuracy"] == 0.0
 
 

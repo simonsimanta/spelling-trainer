@@ -397,7 +397,7 @@ def test_word_family_generation_sanitizes_bad_ly_forms() -> None:
     assert "necessaryly" not in family_terms
 
 
-def test_bulk_generation_endpoints_return_result_shapes(monkeypatch) -> None:
+def test_bulk_generation_endpoints_return_result_shapes(monkeypatch, tmp_path) -> None:
     _seed_core_words()
     client = _client()
 
@@ -410,6 +410,7 @@ def test_bulk_generation_endpoints_return_result_shapes(monkeypatch) -> None:
     def fake_audio(_: str, voice: str = "alloy", model: str = "gpt-4o-mini-tts") -> bytes:
         return b"fake-mp3"
 
+    monkeypatch.setattr(audio, "audio_cache_dir", lambda: tmp_path)
     monkeypatch.setattr(audio, "generate_tts_audio", fake_audio)
     audio_result = client.post(
         "/spelling/audio/bulk-generate",
@@ -419,6 +420,8 @@ def test_bulk_generation_endpoints_return_result_shapes(monkeypatch) -> None:
     audio_payload = audio_result.json()
     assert {"requested_limit", "generated", "cached", "failed", "remaining"}.issubset(audio_payload.keys())
     assert audio_payload["requested_limit"] == 2
+    assert audio_payload["voice"] == "alloy"
+    assert audio_payload["model"] == "gpt-4o-mini-tts"
 
 
 def test_practice_and_dictation_sessions_create_expected_items() -> None:
@@ -979,12 +982,15 @@ def test_content_and_audio_bulk_generation(monkeypatch, tmp_path) -> None:
     assert content.json()["generated"] >= 1
     assert client.get("/spelling/content/bulk-status").json()["generated"] >= 1
 
-    monkeypatch.setattr(audio, "audio_cache_path", lambda text: tmp_path / f"{text}.mp3")
+    monkeypatch.setattr(audio, "audio_cache_dir", lambda: tmp_path)
     monkeypatch.setattr(audio, "generate_tts_audio", lambda text, voice="alloy", model="gpt-4o-mini-tts": b"bulk-mp3")
     result = client.post("/spelling/audio/bulk-generate", json={"limit": 2})
     assert result.status_code == 200
     assert result.json()["generated"] >= 1
-    assert client.get("/spelling/audio/bulk-status").json()["generated"] >= 1
+    status = client.get("/spelling/audio/bulk-status").json()
+    assert status["generated"] >= 1
+    assert status["voice"] == "alloy"
+    assert status["model"] == "gpt-4o-mini-tts"
 
 
 def test_cached_audio_endpoint(monkeypatch, tmp_path) -> None:
@@ -992,8 +998,163 @@ def test_cached_audio_endpoint(monkeypatch, tmp_path) -> None:
     client = _client()
     cache_file = tmp_path / "cached.mp3"
     cache_file.write_bytes(b"fake-mp3")
-    monkeypatch.setattr(audio, "audio_cache_path", lambda text: cache_file)
+    monkeypatch.setattr(audio, "audio_cache_path", lambda text, voice, model: cache_file)
 
     audio_response = client.get("/spelling/audio", params={"text": "definitely"})
     assert audio_response.status_code == 200
     assert audio_response.content == b"fake-mp3"
+    assert audio_response.headers["x-audio-cache"] == "hit"
+
+
+def test_audio_cache_and_on_demand_generation_are_variant_aware(monkeypatch, tmp_path) -> None:
+    _seed_core_words()
+    client = _client()
+    generated_variants = []
+
+    def fake_audio(text: str, voice: str, model: str) -> bytes:
+        generated_variants.append((text, voice, model))
+        return f"{voice}:{model}".encode()
+
+    monkeypatch.setattr(audio, "audio_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(audio, "generate_tts_audio", fake_audio)
+    settings = client.patch(
+        "/settings",
+        json={"tts_voice": "coral", "tts_model": "gpt-4o-mini-tts"},
+    )
+    assert settings.status_code == 200
+
+    saved_variant = client.get("/spelling/audio", params={"text": "Definitely"})
+    explicit_variant = client.get(
+        "/spelling/audio",
+        params={"text": "Definitely", "voice": "alloy", "model": "tts-1"},
+    )
+    saved_variant_again = client.get("/spelling/audio", params={"text": "Definitely"})
+
+    assert saved_variant.content == b"coral:gpt-4o-mini-tts"
+    assert explicit_variant.content == b"alloy:tts-1"
+    assert saved_variant.headers["x-audio-cache"] == "miss"
+    assert explicit_variant.headers["x-audio-cache"] == "miss"
+    assert saved_variant_again.headers["x-audio-cache"] == "hit"
+    assert generated_variants == [
+        ("Definitely", "coral", "gpt-4o-mini-tts"),
+        ("Definitely", "alloy", "tts-1"),
+    ]
+    assert len(list(tmp_path.glob("*.mp3"))) == 2
+    assert audio.audio_cache_path("Definitely", "coral", "gpt-4o-mini-tts") != audio.audio_cache_path(
+        "Definitely",
+        "alloy",
+        "tts-1",
+    )
+
+
+def test_bulk_audio_status_and_legacy_manifests_are_variant_specific(monkeypatch, tmp_path) -> None:
+    _seed_core_words()
+    client = _client()
+    legacy_path = tmp_path / "legacy-text-only.mp3"
+    legacy_path.write_bytes(b"stale-voice")
+
+    db = SessionLocal()
+    try:
+        word = db.scalar(
+            select(models.SpellingWord)
+            .join(models.SpellingWordSource)
+            .where(models.SpellingWordSource.source_name == "oxford_3000")
+            .order_by(models.SpellingWordSource.list_rank)
+        )
+        assert word is not None
+        db.add(
+            models.SpellingAudioManifest(
+                word_id=word.id,
+                term=word.term,
+                voice="coral",
+                model="gpt-4o-mini-tts",
+                status="generated",
+                file_path=str(legacy_path),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    generated_variants = []
+
+    def fake_audio(text: str, voice: str, model: str) -> bytes:
+        generated_variants.append((text, voice, model))
+        return b"fresh-variant"
+
+    monkeypatch.setattr(audio, "audio_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(audio, "generate_tts_audio", fake_audio)
+
+    coral_result = client.post(
+        "/spelling/audio/bulk-generate",
+        json={"limit": 1, "voice": "coral", "model": "gpt-4o-mini-tts"},
+    )
+    assert coral_result.status_code == 200
+    assert coral_result.json()["generated"] == 1
+    assert generated_variants[0][1:] == ("coral", "gpt-4o-mini-tts")
+
+    coral_status = client.get(
+        "/spelling/audio/bulk-status",
+        params={"voice": "coral", "model": "gpt-4o-mini-tts"},
+    ).json()
+    alloy_status = client.get(
+        "/spelling/audio/bulk-status",
+        params={"voice": "alloy", "model": "gpt-4o-mini-tts"},
+    ).json()
+    assert coral_status["generated"] == 1
+    assert coral_status["voice"] == "coral"
+    assert alloy_status["generated"] == 0
+    assert alloy_status["pending"] == alloy_status["total_words"]
+    assert legacy_path.read_bytes() == b"stale-voice"
+
+
+def test_audio_generation_errors_are_actionable(monkeypatch, tmp_path) -> None:
+    _seed_core_words()
+    client = _client()
+    monkeypatch.setattr(audio, "audio_cache_dir", lambda: tmp_path)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    missing_key = client.get("/spelling/audio", params={"text": "missing key"})
+    assert missing_key.status_code == 503
+    assert "not configured" in missing_key.json()["detail"]
+
+    class QuotaResponse:
+        status_code = 429
+        content = b""
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(audio.requests, "post", lambda *args, **kwargs: QuotaResponse())
+    quota = client.get("/spelling/audio", params={"text": "quota error"})
+    assert quota.status_code == 429
+    assert "quota or rate limit" in quota.json()["detail"]
+
+    def network_error(*args, **kwargs):
+        raise audio.requests.ConnectionError()
+
+    monkeypatch.setattr(audio.requests, "post", network_error)
+    network = client.get("/spelling/audio", params={"text": "network error"})
+    assert network.status_code == 502
+    assert "could not reach OpenAI" in network.json()["detail"]
+
+
+def test_tts_request_uses_selected_variant_and_mp3_response_format(monkeypatch) -> None:
+    captured = {}
+
+    class SuccessResponse:
+        status_code = 200
+        content = b"generated-audio"
+
+    def fake_post(url, headers, json, timeout):
+        captured.update({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return SuccessResponse()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(audio.requests, "post", fake_post)
+
+    result = audio.generate_tts_audio("Spell clearly.", voice="Coral", model="gpt-4o-mini-tts")
+
+    assert result == b"generated-audio"
+    assert captured["json"]["voice"] == "coral"
+    assert captured["json"]["model"] == "gpt-4o-mini-tts"
+    assert captured["json"]["response_format"] == "mp3"
+    assert "format" not in captured["json"]

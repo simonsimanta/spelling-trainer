@@ -39,8 +39,8 @@ class SettingsRead(BaseModel):
 
 class SettingsUpdate(BaseModel):
     theme: Optional[str] = Field(default=None, max_length=40)
-    tts_voice: Optional[str] = Field(default=None, max_length=40)
-    tts_model: Optional[str] = Field(default=None, max_length=80)
+    tts_voice: Optional[str] = Field(default=None, min_length=1, max_length=40)
+    tts_model: Optional[str] = Field(default=None, min_length=1, max_length=80)
     ai_model: Optional[str] = Field(default=None, max_length=80)
     ai_generation_enabled: Optional[bool] = None
     content_bulk_limit: Optional[int] = Field(default=None, ge=1, le=5000)
@@ -407,18 +407,22 @@ class BulkGeneratePreview(BaseModel):
 
 class SpellingAudioPreloadRequest(BaseModel):
     texts: List[str] = Field(default_factory=list)
+    voice: Optional[str] = Field(default=None, min_length=1, max_length=40)
+    model: Optional[str] = Field(default=None, min_length=1, max_length=80)
 
 
 class SpellingAudioPreloadResponse(BaseModel):
     requested: int
     cached: int
     generated: int
+    voice: str
+    model: str
 
 
 class SpellingAudioBulkGenerateRequest(BaseModel):
     limit: int = Field(default=100, ge=1, le=5000)
-    voice: str = Field(default="alloy", max_length=40)
-    model: str = Field(default="gpt-4o-mini-tts", max_length=80)
+    voice: str = Field(default="alloy", min_length=1, max_length=40)
+    model: str = Field(default="gpt-4o-mini-tts", min_length=1, max_length=80)
 
 
 class SpellingAudioBulkGenerateResult(BaseModel):
@@ -427,6 +431,8 @@ class SpellingAudioBulkGenerateResult(BaseModel):
     cached: int
     failed: int
     remaining: int
+    voice: str
+    model: str
 
 
 class SpellingAudioBulkStatus(BaseModel):
@@ -434,6 +440,8 @@ class SpellingAudioBulkStatus(BaseModel):
     generated: int
     pending: int
     failed: int
+    voice: str
+    model: str
 
 
 class SpellingCostOverview(BaseModel):

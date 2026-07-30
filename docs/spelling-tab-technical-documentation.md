@@ -139,9 +139,9 @@ Most learning logic still lives in `repository.py`. This is the largest remainin
 | `GET` | `/spelling/content/bulk-status` | Count loaded Oxford words with generated/pending/failed content. |
 | `GET` | `/spelling/content/bulk-preview?limit=100` | Preview content generation batch and estimated API calls. |
 | `POST` | `/spelling/content/bulk-generate` | Generate cached learning content for loaded Oxford words. |
-| `GET` | `/spelling/audio` | Return cached word/sentence MP3 or generate OpenAI TTS on demand. |
-| `POST` | `/spelling/audio/preload` | Preload a list of audio texts. |
-| `GET` | `/spelling/audio/bulk-status` | Count loaded Oxford words with generated/pending/failed audio. |
+| `GET` | `/spelling/audio?text=...&voice=alloy&model=gpt-4o-mini-tts` | Return or generate the selected TTS variant; omitted voice/model values use saved settings. |
+| `POST` | `/spelling/audio/preload` | Preload text using request voice/model values or saved settings. |
+| `GET` | `/spelling/audio/bulk-status?voice=alloy&model=gpt-4o-mini-tts` | Count generated/pending/failed audio for one selected variant. |
 | `GET` | `/spelling/audio/bulk-preview?limit=100&voice=alloy&model=gpt-4o-mini-tts` | Preview audio generation batch. |
 | `POST` | `/spelling/audio/bulk-generate` | Generate cached OpenAI TTS files for loaded Oxford words. |
 
@@ -242,13 +242,14 @@ If `OPENAI_API_KEY` is missing, content generation falls back to deterministic l
 
 ### Audio Cache
 
-Audio generation uses OpenAI TTS and stores MP3 files in `data/spelling_audio`. Cache filenames are SHA-256 hashes of normalized text.
+Audio generation uses OpenAI TTS and stores MP3 files in `data/spelling_audio`. Cache filenames are SHA-256 hashes of normalized text, voice, and model.
 
 - Word audio uses the isolated word.
 - Dictation audio uses the full sentence/phrase prompt.
-- Bulk audio generation is scoped to loaded Oxford words.
-- On-demand `GET /spelling/audio` can generate any text if the key is configured.
-- Missing/invalid OpenAI credentials produce a visible audio failure in the UI.
+- Bulk audio generation and status are scoped to loaded Oxford words and the selected voice/model variant.
+- Legacy manifests that point at the old text-only cache path are regenerated into a variant-specific file.
+- On-demand `GET /spelling/audio` uses saved TTS settings unless explicit voice/model query parameters are provided.
+- Missing/invalid credentials, quota/rate limits, network failures, and provider failures produce actionable UI messages.
 
 ## Learning Logic
 
@@ -559,9 +560,7 @@ Frontend verification is currently manual/browser-based:
 - Split `repository.py` into focused modules: content, dashboard, sessions, attempts, review/SRS, suggestions, profile/settings.
 - Move legacy mini-game item types behind compatibility-only code or remove once no clients depend on them.
 - Make `ai_generation_enabled` actually gate OpenAI content generation. It is currently stored in settings, but content generation still uses OpenAI when a key is present.
-- Make `GET /spelling/audio` use saved voice/model settings or accept voice/model params consistently.
 - Add an explicit `exploration_accuracy` dashboard stat.
-- Add generated timestamps/updated timestamps consistently for audio manifests.
 - Consider background jobs for long content/audio batches before increasing batch size heavily.
 
 ### Frontend / UX

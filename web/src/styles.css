@@ -1258,6 +1258,38 @@ p {
   border: 1px solid #fecdd3;
 }
 
+.dictation-outcomes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 24px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #dce5e2;
+}
+
+.dictation-outcomes > span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dictation-outcomes strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.dictation-outcomes .outcome-pass strong {
+  color: #08703f;
+}
+
+.dictation-outcomes .outcome-review strong {
+  color: #b42318;
+}
+
 .diff-row,
 .hint-grid,
 .sentence-diff div {
@@ -1685,6 +1717,7 @@ p {
 
   .choice-grid,
   .correction-form,
+  .dictation-outcomes,
   .inline-form,
   .practice-card-actions {
     grid-template-columns: 1fr;

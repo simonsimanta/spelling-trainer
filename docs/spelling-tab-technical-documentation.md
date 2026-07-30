@@ -307,8 +307,11 @@ Session creation:
 
 Grading:
 
-- The target word must appear exactly after normalization in the typed sentence.
-- Surrounding sentence text gets a sentence-level diff, but target spelling is the strict grading signal.
+- Dictation returns separate `target_spelling_correct`, `sentence_complete`, and `sentence_similarity` outcomes.
+- Target matching is case-insensitive and token-based while preserving meaningful apostrophes and hyphens.
+- Sentence completeness compares normalized token sequences, so capitalization and surrounding punctuation do not lower the score.
+- `is_correct`, points, session completion, activity accuracy, and SRS/mastery progression use target spelling only.
+- Sentence completeness and similarity are feedback signals and do not advance or penalize spelling mastery.
 - Wrong target spelling requires correction before moving on.
 
 ### Review And SRS

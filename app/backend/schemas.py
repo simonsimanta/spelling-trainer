@@ -132,6 +132,9 @@ class SpellingAttemptResult(BaseModel):
     example_sentence: str
     diff_json: Optional[Dict[str, Any]] = None
     sentence_diff_json: Optional[Dict[str, Any]] = None
+    target_spelling_correct: Optional[bool] = None
+    sentence_complete: Optional[bool] = None
+    sentence_similarity: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     chunk_feedback: Optional[str] = None
     phonetic_feedback: Optional[Dict[str, Any]] = None
     forced_correction_required: bool = False

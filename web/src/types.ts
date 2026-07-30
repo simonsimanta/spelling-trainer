@@ -127,6 +127,56 @@ export type Word = {
   known_skipped: boolean;
 };
 
+export type WordManagementCounts = {
+  all: number;
+  oxford: number;
+  personal: number;
+  suggested: number;
+  trouble: number;
+  provisional: number;
+  stable: number;
+  seed: number;
+  archived: number;
+};
+
+export type ManagedWord = {
+  id: number;
+  term: string;
+  level: string;
+  source: string;
+  source_label: string;
+  is_active: boolean;
+  is_personal: boolean;
+  source_list?: string | null;
+  short_meaning?: string | null;
+  example_sentence?: string | null;
+  part_of_speech?: string | null;
+  cefr_level?: string | null;
+  frequency_rank?: number | null;
+  mastery_state: string;
+  diagnostic_status: string;
+  known_skipped: boolean;
+  priority_score: number;
+  review_stage?: string | null;
+  due_date?: string | null;
+  last_attempt_at?: string | null;
+  last_attempt_correct?: boolean | null;
+};
+
+export type WordManagementPage = {
+  items: ManagedWord[];
+  total: number;
+  counts: WordManagementCounts;
+};
+
+export type SpellingSuggestion = {
+  id: number;
+  word_id?: number | null;
+  term: string;
+  reason: string;
+  status: string;
+};
+
 export type WordContent = {
   word_id: number;
   term: string;

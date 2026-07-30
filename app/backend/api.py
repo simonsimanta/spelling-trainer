@@ -100,6 +100,31 @@ def get_spelling_words(
     return words.list_words(db, level=level)
 
 
+@app.get("/spelling/word-management", response_model=schemas.SpellingWordManagementPage)
+def get_spelling_word_management(
+    query: str = Query(default="", max_length=120),
+    category: str = Query(default="all"),
+    mastery_state: str = Query(default=""),
+    diagnostic_status: str = Query(default=""),
+    sort: str = Query(default="term"),
+    direction: str = Query(default="asc"),
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> schemas.SpellingWordManagementPage:
+    return words.list_managed_words(
+        db,
+        query=query,
+        category=category,
+        mastery_state=mastery_state,
+        diagnostic_status=diagnostic_status,
+        sort=sort,
+        direction=direction,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @app.get("/spelling/oxford/load-status", response_model=schemas.OxfordLoadStatus)
 def get_spelling_oxford_load_status(db: Session = Depends(get_db)) -> schemas.OxfordLoadStatus:
     return oxford.load_status(db)
@@ -118,7 +143,43 @@ def post_spelling_oxford_load_batch(
 
 @app.post("/spelling/words", response_model=schemas.SpellingWordRead)
 def post_spelling_word(payload: schemas.SpellingWordCreate, db: Session = Depends(get_db)) -> schemas.SpellingWordRead:
-    return words.create_word(db, payload)
+    try:
+        return words.create_word(db, payload)
+    except ValueError as err:
+        status_code = 400 if str(err).startswith("Word must") else 409
+        raise HTTPException(status_code=status_code, detail=str(err))
+
+
+@app.patch("/spelling/words/{word_id}", response_model=schemas.SpellingWordRead)
+def patch_spelling_word(
+    word_id: int,
+    payload: schemas.SpellingWordUpdate,
+    db: Session = Depends(get_db),
+) -> schemas.SpellingWordRead:
+    try:
+        return words.update_word(db, word_id, payload)
+    except PermissionError as err:
+        raise HTTPException(status_code=403, detail=str(err))
+    except ValueError as err:
+        if str(err) == "Word not found":
+            status_code = 404
+        elif str(err).startswith("Word must"):
+            status_code = 400
+        else:
+            status_code = 409
+        raise HTTPException(status_code=status_code, detail=str(err))
+
+
+@app.post("/spelling/words/{word_id}/actions", response_model=schemas.SpellingWordActionResult)
+def post_spelling_word_action(
+    word_id: int,
+    payload: schemas.SpellingWordAction,
+    db: Session = Depends(get_db),
+) -> schemas.SpellingWordActionResult:
+    try:
+        return words.apply_action(db, word_id, payload)
+    except ValueError as err:
+        raise HTTPException(status_code=404, detail=str(err))
 
 
 @app.get("/spelling/word-content/{word_id}", response_model=schemas.SpellingWordContentRead)

@@ -6,7 +6,7 @@ import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
-from sqlalchemy import Integer, func, or_, select
+from sqlalchemy import Integer, and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -1011,11 +1011,382 @@ def list_spelling_words(db: Session, level: Optional[str] = None) -> List[models
     return list(db.scalars(stmt.limit(500)).all())
 
 
+def _word_management_category_filter(category: str) -> Any:
+    active = models.SpellingWord.is_active.is_(True)
+    normalized = category if category in {
+        "all",
+        "oxford",
+        "personal",
+        "suggested",
+        "trouble",
+        "provisional",
+        "stable",
+        "seed",
+        "archived",
+    } else "all"
+    if normalized == "archived":
+        return models.SpellingWord.is_active.is_(False)
+    if normalized == "oxford":
+        return and_(
+            active,
+            or_(
+                models.SpellingWord.source == "oxford",
+                models.SpellingWord.level == "core5k",
+                _word_has_oxford_source(),
+            ),
+        )
+    if normalized == "personal":
+        return and_(
+            active,
+            or_(
+                models.SpellingWord.source == "manual",
+                models.SpellingWord.level == "personal",
+            ),
+        )
+    if normalized == "suggested":
+        return and_(
+            active,
+            or_(
+                models.SpellingWord.source.in_(["llm", "llm_suggestion"]),
+                models.SpellingWord.level == "suggested",
+            ),
+        )
+    if normalized == "trouble":
+        return and_(
+            active,
+            or_(
+                models.SpellingWord.mastery_state.in_(["trouble", "lapse"]),
+                models.SpellingReview.current_stage == models.SpellingStage.trouble,
+            ),
+        )
+    if normalized == "provisional":
+        return and_(active, models.SpellingWord.mastery_state == "known_provisional")
+    if normalized == "stable":
+        return and_(
+            active,
+            or_(
+                models.SpellingWord.mastery_state.in_(list(STABLE_MASTERY_STATES)),
+                models.SpellingReview.current_stage == models.SpellingStage.mastered,
+            ),
+        )
+    if normalized == "seed":
+        return and_(
+            active,
+            models.SpellingWord.source.in_(["seed", "default"]),
+            ~_word_has_oxford_source(),
+        )
+    return active
+
+
+def _word_source_label(word: models.SpellingWord) -> str:
+    if word.source == "oxford" or word.level == "core5k" or "oxford_" in (word.source_list or ""):
+        return "Oxford"
+    if word.source == "manual" or word.level == "personal":
+        return "Personal"
+    if word.source in {"llm", "llm_suggestion"} or word.level == "suggested":
+        return "AI suggestion"
+    if word.source in {"seed", "default"}:
+        return "Starter"
+    return word.source.replace("_", " ").title()
+
+
+def _word_management_item(
+    word: models.SpellingWord,
+    review: Optional[models.SpellingReview],
+    source_frequency_rank: Optional[int],
+    last_attempt_at: Optional[datetime],
+    last_attempt_correct: Optional[bool],
+) -> schemas.SpellingWordManagementItem:
+    return schemas.SpellingWordManagementItem(
+        id=word.id,
+        term=word.term,
+        level=word.level,
+        source=word.source,
+        source_label=_word_source_label(word),
+        is_active=word.is_active,
+        is_personal=word.source == "manual" or word.level == "personal",
+        source_list=word.source_list,
+        short_meaning=word.short_meaning,
+        example_sentence=word.example_sentence,
+        part_of_speech=word.part_of_speech,
+        cefr_level=word.cefr_level,
+        frequency_rank=word.frequency_rank or source_frequency_rank,
+        mastery_state=word.mastery_state,
+        diagnostic_status=word.diagnostic_status,
+        known_skipped=word.known_skipped,
+        priority_score=word.priority_score,
+        review_stage=review.current_stage.value if review else None,
+        due_date=review.due_date if review else None,
+        last_attempt_at=last_attempt_at,
+        last_attempt_correct=last_attempt_correct,
+    )
+
+
+def _word_management_count(db: Session, category: str) -> int:
+    return int(
+        db.scalar(
+            select(func.count(func.distinct(models.SpellingWord.id)))
+            .outerjoin(
+                models.SpellingReview,
+                models.SpellingReview.word_id == models.SpellingWord.id,
+            )
+            .where(_word_management_category_filter(category))
+        )
+        or 0
+    )
+
+
+def list_managed_spelling_words(
+    db: Session,
+    *,
+    query: str = "",
+    category: str = "all",
+    mastery_state: str = "",
+    diagnostic_status: str = "",
+    sort: str = "term",
+    direction: str = "asc",
+    limit: int = 100,
+    offset: int = 0,
+) -> schemas.SpellingWordManagementPage:
+    latest_attempt_at = (
+        select(models.SpellingAttempt.created_at)
+        .where(models.SpellingAttempt.word_id == models.SpellingWord.id)
+        .order_by(
+            models.SpellingAttempt.created_at.desc(),
+            models.SpellingAttempt.id.desc(),
+        )
+        .limit(1)
+        .correlate(models.SpellingWord)
+        .scalar_subquery()
+    )
+    latest_attempt_correct = (
+        select(models.SpellingAttempt.is_correct)
+        .where(models.SpellingAttempt.word_id == models.SpellingWord.id)
+        .order_by(
+            models.SpellingAttempt.created_at.desc(),
+            models.SpellingAttempt.id.desc(),
+        )
+        .limit(1)
+        .correlate(models.SpellingWord)
+        .scalar_subquery()
+    )
+    source_frequency_rank = (
+        select(func.min(models.SpellingWordSource.list_rank))
+        .where(models.SpellingWordSource.word_id == models.SpellingWord.id)
+        .correlate(models.SpellingWord)
+        .scalar_subquery()
+    )
+    filters = [_word_management_category_filter(category)]
+    normalized_query = query.strip().lower()
+    if normalized_query:
+        filters.append(
+            or_(
+                func.lower(models.SpellingWord.term).contains(normalized_query, autoescape=True),
+                func.lower(func.coalesce(models.SpellingWord.short_meaning, "")).contains(
+                    normalized_query,
+                    autoescape=True,
+                ),
+            )
+        )
+    if mastery_state and mastery_state != "all":
+        filters.append(models.SpellingWord.mastery_state == mastery_state)
+    if diagnostic_status and diagnostic_status != "all":
+        filters.append(models.SpellingWord.diagnostic_status == diagnostic_status)
+
+    joined = (
+        select(
+            models.SpellingWord,
+            models.SpellingReview,
+            source_frequency_rank.label("source_frequency_rank"),
+            latest_attempt_at.label("last_attempt_at"),
+            latest_attempt_correct.label("last_attempt_correct"),
+        )
+        .outerjoin(
+            models.SpellingReview,
+            models.SpellingReview.word_id == models.SpellingWord.id,
+        )
+        .where(*filters)
+    )
+    total = int(
+        db.scalar(
+            select(func.count(func.distinct(models.SpellingWord.id)))
+            .outerjoin(
+                models.SpellingReview,
+                models.SpellingReview.word_id == models.SpellingWord.id,
+            )
+            .where(*filters)
+        )
+        or 0
+    )
+
+    sort_columns = {
+        "term": models.SpellingWord.term,
+        "frequency_rank": func.coalesce(
+            models.SpellingWord.frequency_rank,
+            source_frequency_rank,
+        ),
+        "mastery_state": models.SpellingWord.mastery_state,
+        "due_date": models.SpellingReview.due_date,
+        "last_attempt": latest_attempt_at,
+        "priority": models.SpellingWord.priority_score,
+    }
+    sort_column = sort_columns.get(sort, models.SpellingWord.term)
+    ordered = sort_column.desc() if direction == "desc" else sort_column.asc()
+    stmt = joined.order_by(
+        sort_column.is_(None),
+        ordered,
+        models.SpellingWord.term.asc(),
+    ).offset(offset).limit(limit)
+    rows = db.execute(stmt).all()
+
+    categories = [
+        "all",
+        "oxford",
+        "personal",
+        "suggested",
+        "trouble",
+        "provisional",
+        "stable",
+        "seed",
+        "archived",
+    ]
+    counts = schemas.SpellingWordManagementCounts(
+        **{item: _word_management_count(db, item) for item in categories}
+    )
+    return schemas.SpellingWordManagementPage(
+        items=[
+            _word_management_item(
+                word,
+                review,
+                source_frequency_rank_value,
+                last_attempt_at_value,
+                last_attempt_correct_value,
+            )
+            for (
+                word,
+                review,
+                source_frequency_rank_value,
+                last_attempt_at_value,
+                last_attempt_correct_value,
+            ) in rows
+        ],
+        total=total,
+        counts=counts,
+    )
+
+
+def update_personal_spelling_word(
+    db: Session,
+    word_id: int,
+    payload: schemas.SpellingWordUpdate,
+) -> models.SpellingWord:
+    word = db.get(models.SpellingWord, word_id)
+    if not word:
+        raise ValueError("Word not found")
+    if word.source != "manual" and word.level != "personal":
+        raise PermissionError("Only personal words can be edited.")
+
+    values = payload.model_dump(exclude_unset=True)
+    if "term" in values and values["term"] is not None:
+        normalized = values.pop("term").strip().lower()
+        if len(normalized) < 2 or not any(character.isalpha() for character in normalized):
+            raise ValueError("Word must contain at least two letters.")
+        duplicate = db.scalar(
+            select(models.SpellingWord).where(
+                models.SpellingWord.term == normalized,
+                models.SpellingWord.id != word.id,
+            )
+        )
+        if duplicate:
+            raise ValueError(f'"{normalized}" already exists in {_word_source_label(duplicate)}.')
+        word.term = normalized
+        word.chunked_form = _chunk_hint(normalized)
+    for field, value in values.items():
+        if isinstance(value, str):
+            value = value.strip() or None
+        setattr(word, field, value)
+    db.commit()
+    db.refresh(word)
+    return word
+
+
+def apply_spelling_word_action(
+    db: Session,
+    word_id: int,
+    action: str,
+) -> schemas.SpellingWordActionResult:
+    word = db.get(models.SpellingWord, word_id)
+    if not word:
+        raise ValueError("Word not found")
+    review = _ensure_spelling_review(db, word)
+    now = datetime.utcnow()
+    message = ""
+
+    if action == "practice":
+        word.is_active = True
+        word.known_skipped = False
+        word.mastery_state = "review"
+        word.priority_score = max(word.priority_score, 3.0)
+        word.introduced_at = word.introduced_at or now
+        review.current_stage = models.SpellingStage.review
+        review.due_date = date.today()
+        review.interval_days = 0
+        message = f"{word.term.title()} is ready for practice."
+    elif action == "mark_known":
+        submit_spelling_placement(
+            db,
+            schemas.SpellingPlacementAttempt(word_id=word.id, action="known"),
+            commit=False,
+        )
+        message = f"{word.term.title()} was marked known."
+    elif action == "reset":
+        word.is_active = True
+        word.known_skipped = False
+        word.mastery_state = "new"
+        word.diagnostic_status = "untested"
+        word.priority_score = 0.0
+        word.introduced_at = None
+        word.last_seen_at = None
+        review.due_date = date.today()
+        review.interval_days = 0
+        review.consecutive_correct = 0
+        review.incorrect_count = 0
+        review.ease_factor = 2.3
+        review.stability_score = 0.0
+        review.lapse_count = 0
+        review.last_attempt_at = None
+        review.average_response_ms = None
+        review.forced_correction_required = False
+        review.current_stage = models.SpellingStage.learning
+        review.mastery_score = 0.0
+        review.consecutive_forced_corrections = 0
+        message = f"{word.term.title()} learning progress was reset."
+    elif action == "archive":
+        word.is_active = False
+        message = f"{word.term.title()} was archived."
+    elif action == "restore":
+        word.is_active = True
+        message = f"{word.term.title()} was restored."
+    else:
+        raise ValueError("Unsupported word action")
+
+    review.updated_at = now
+    db.commit()
+    return schemas.SpellingWordActionResult(
+        word_id=word.id,
+        term=word.term,
+        action=action,
+        message=message,
+    )
+
+
 def create_spelling_word(db: Session, payload: schemas.SpellingWordCreate) -> models.SpellingWord:
     normalized = payload.term.strip().lower()
+    if len(normalized) < 2 or not any(character.isalpha() for character in normalized):
+        raise ValueError("Word must contain at least two letters.")
     existing = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == normalized))
     if existing:
-        return existing
+        raise ValueError(f'"{normalized}" already exists in {_word_source_label(existing)}.')
     word = models.SpellingWord(
         term=normalized,
         level=payload.level,
@@ -1541,7 +1912,30 @@ def create_spelling_session(db: Session, payload: schemas.SpellingSessionCreate)
     db.add(session)
     db.flush()
 
-    if session_type == models.SpellingSessionType.diagnostic:
+    if payload.word_ids:
+        requested_ids = list(dict.fromkeys(payload.word_ids))
+        selected_words = list(
+            db.scalars(
+                select(models.SpellingWord).where(
+                    models.SpellingWord.id.in_(requested_ids),
+                    models.SpellingWord.is_active.is_(True),
+                )
+            ).all()
+        )
+        words_by_id = {word.id: word for word in selected_words}
+        ranked_words = [
+            RankedWord(
+                word=words_by_id[word_id],
+                score=SelectionScore(
+                    total=max(words_by_id[word_id].priority_score, 3.0),
+                    reason="selected from Word Lists",
+                    breakdown={"manual_selection": 3.0},
+                ),
+            )
+            for word_id in requested_ids
+            if word_id in words_by_id
+        ][: payload.target_size]
+    elif session_type == models.SpellingSessionType.diagnostic:
         ranked_words = _diagnostic_candidate_words(db, payload.target_size, payload.level)
     elif session_type in {models.SpellingSessionType.learn_new, models.SpellingSessionType.exploration, models.SpellingSessionType.core_5k}:
         words = _target_oxford_words(db, limit=payload.target_size)

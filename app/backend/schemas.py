@@ -109,6 +109,67 @@ class SpellingWordRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SpellingWordManagementItem(BaseModel):
+    id: int
+    term: str
+    level: str
+    source: str
+    source_label: str
+    is_active: bool
+    is_personal: bool
+    source_list: Optional[str] = None
+    short_meaning: Optional[str] = None
+    example_sentence: Optional[str] = None
+    part_of_speech: Optional[str] = None
+    cefr_level: Optional[str] = None
+    frequency_rank: Optional[int] = None
+    mastery_state: str
+    diagnostic_status: str
+    known_skipped: bool
+    priority_score: float
+    review_stage: Optional[str] = None
+    due_date: Optional[date] = None
+    last_attempt_at: Optional[datetime] = None
+    last_attempt_correct: Optional[bool] = None
+
+
+class SpellingWordManagementCounts(BaseModel):
+    all: int = 0
+    oxford: int = 0
+    personal: int = 0
+    suggested: int = 0
+    trouble: int = 0
+    provisional: int = 0
+    stable: int = 0
+    seed: int = 0
+    archived: int = 0
+
+
+class SpellingWordManagementPage(BaseModel):
+    items: List[SpellingWordManagementItem] = Field(default_factory=list)
+    total: int
+    counts: SpellingWordManagementCounts
+
+
+class SpellingWordUpdate(BaseModel):
+    term: Optional[str] = Field(default=None, min_length=2, max_length=120)
+    short_meaning: Optional[str] = Field(default=None, max_length=1000)
+    example_sentence: Optional[str] = Field(default=None, max_length=1000)
+    part_of_speech: Optional[str] = Field(default=None, max_length=60)
+    cefr_level: Optional[str] = Field(default=None, pattern="^(A1|A2|B1|B2|C1|C2)?$")
+
+
+class SpellingWordAction(BaseModel):
+    action: Literal["practice", "mark_known", "reset", "archive", "restore"]
+
+
+class SpellingWordActionResult(BaseModel):
+    word_id: int
+    term: str
+    action: str
+    message: str
+
+
 class SpellingWordContentRead(BaseModel):
     word_id: int
     term: str
@@ -183,6 +244,7 @@ class SpellingSessionCreate(BaseModel):
     target_size: int = Field(default=10, ge=1, le=100)
     exercise_type: Literal["spelling_quiz", "fill_blank", "word_scramble", "choose_correct", "mixed"] = "mixed"
     level: str = "all"
+    word_ids: List[int] = Field(default_factory=list, max_length=100)
 
 
 class SpellingSessionItemOut(BaseModel):

@@ -249,6 +249,132 @@ test("database outage shows readiness actions instead of an empty app", async ({
   await expect(page.getByText(/Database-backed settings are unavailable/)).toBeVisible();
 });
 
+test("word lists supports management, empty search, duplicates, and practice now", async ({ page }) => {
+  const managedWord = {
+    id: 41,
+    term: "meticulous",
+    level: "personal",
+    source: "manual",
+    source_label: "Personal",
+    is_active: true,
+    is_personal: true,
+    source_list: null,
+    short_meaning: "Very careful and precise.",
+    example_sentence: "She kept meticulous notes.",
+    part_of_speech: "adjective",
+    cefr_level: "C1",
+    frequency_rank: null,
+    mastery_state: "lapse",
+    diagnostic_status: "missed",
+    known_skipped: false,
+    priority_score: 3,
+    review_stage: "trouble",
+    due_date: "2026-07-30",
+    last_attempt_at: "2026-07-30T12:00:00",
+    last_attempt_correct: false
+  };
+  const counts = {
+    all: 20,
+    oxford: 4,
+    personal: 1,
+    suggested: 0,
+    trouble: 1,
+    provisional: 0,
+    stable: 0,
+    seed: 15,
+    archived: 0
+  };
+
+  await page.route("**/dashboard", async (route) => {
+    await route.fulfill({ json: firstRunDashboard });
+  });
+  await page.route("**/readiness", async (route) => {
+    await route.fulfill({ json: readyEnvironment });
+  });
+  await page.route("**/spelling/word-management?*", async (route) => {
+    const url = new URL(route.request().url());
+    const empty = url.searchParams.get("query") === "zzz";
+    await route.fulfill({
+      json: {
+        items: empty ? [] : [managedWord],
+        total: empty ? 0 : 1,
+        counts
+      }
+    });
+  });
+  await page.route("**/spelling/suggestions?*", async (route) => {
+    await route.fulfill({ json: [] });
+  });
+  await page.route("**/spelling/words", async (route) => {
+    await route.fulfill({
+      status: 409,
+      json: { detail: "\"meticulous\" already exists in Personal." }
+    });
+  });
+  await page.route("**/spelling/words/41/actions", async (route) => {
+    await route.fulfill({
+      json: {
+        word_id: 41,
+        term: "meticulous",
+        action: "practice",
+        message: "Meticulous is ready for practice."
+      }
+    });
+  });
+  await page.route("**/spelling/sessions", async (route) => {
+    await route.fulfill({
+      json: {
+        session_id: 9,
+        session_type: "practice",
+        total_items: 1,
+        completed_items: 0,
+        items: [
+          {
+            session_item_id: 91,
+            word_id: 41,
+            term: "meticulous",
+            item_type: "review_word",
+            mode: "practice",
+            prompt_text: "Listen to the word and type its spelling.",
+            source_reason: "selected from Word Lists",
+            queue_reason: "selected from Word Lists",
+            selection_score: 3,
+            score_breakdown: { manual_selection: 3 },
+            status: "pending",
+            audio_ready: true,
+            choices: null,
+            short_meaning: "Very careful and precise.",
+            part_of_speech: "adjective"
+          }
+        ]
+      }
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Word Lists" }).click();
+
+  await expect(page.getByRole("heading", { name: "Word Lists" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Personal 1" })).toBeVisible();
+  await expect(page.getByText("Very careful and precise.")).toBeVisible();
+  await expect(page.getByText("Diagnostic: Missed")).toBeVisible();
+
+  await page.getByLabel("New personal word").fill("meticulous");
+  await page.getByRole("button", { name: "Add word" }).click();
+  await expect(page.getByRole("alert")).toContainText("already exists in Personal");
+
+  await page.getByLabel("Search words").fill("zzz");
+  await page.getByRole("button", { name: "Run search" }).click();
+  await expect(page.getByText("No matching words")).toBeVisible();
+
+  await page.getByRole("button", { name: "Reset" }).click();
+  await expect(page.getByText("Very careful and precise.")).toBeVisible();
+  await page.getByRole("button", { name: "Practice meticulous" }).click();
+
+  await expect(page.getByText("Question 1 of 1")).toBeVisible();
+  await expect(page.getByText("Selected From Word Lists")).toBeVisible();
+});
+
 test("audio failures show an actionable learner message", async ({ page }) => {
   await page.route("**/dashboard", async (route) => {
     await route.fulfill({ json: firstRunDashboard });

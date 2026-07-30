@@ -494,6 +494,16 @@ Environment:
 - `OPENAI_API_KEY`: enables TTS and AI feedback/content.
 - `OPENAI_MODEL`: fallback model setting used by feedback paths.
 - `VITE_API_BASE_URL`: frontend API target, default `http://127.0.0.1:8000`.
+- Database choice is environment-only: use SQLite locally or a Supabase PostgreSQL connection string without editing source files.
+- `/health` reports API liveness; `/readiness` reports database, schema, OpenAI, Oxford-source, and audio-cache readiness.
+
+To switch databases:
+
+1. Set `DATABASE_URL` in `.env`.
+2. Run `python -m alembic upgrade head`.
+3. Restart the backend because settings and the SQLAlchemy engine are initialized at process startup.
+
+For a persistent local backend using Supabase over IPv4, prefer the Session pooler connection from Supabase Connect on port `5432`. Restore `sqlite:///./data/spelling.db` to return to local-only storage.
 
 Install/start:
 

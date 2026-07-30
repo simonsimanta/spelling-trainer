@@ -1399,6 +1399,79 @@ p {
   max-width: 920px;
 }
 
+.readiness-section {
+  margin: 20px 0 28px;
+  padding: 20px 0;
+  border-top: 1px solid #dce5f2;
+  border-bottom: 1px solid #dce5f2;
+}
+
+.readiness-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.readiness-head p:last-child {
+  color: #53627c;
+}
+
+.readiness-list {
+  margin-top: 16px;
+  border-top: 1px solid #e5edf6;
+}
+
+.readiness-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 14px 0;
+  border-bottom: 1px solid #e5edf6;
+}
+
+.readiness-row > svg {
+  margin-top: 2px;
+}
+
+.readiness-row.ready > svg,
+.readiness-row.ready > span {
+  color: #047857;
+}
+
+.readiness-row.warning > svg,
+.readiness-row.warning > span {
+  color: #a16207;
+}
+
+.readiness-row.failed > svg,
+.readiness-row.failed > span {
+  color: #b42318;
+}
+
+.readiness-row p {
+  margin-top: 3px;
+  color: #53627c;
+}
+
+.readiness-row small {
+  display: block;
+  margin-top: 6px;
+  color: #34445f;
+}
+
+.readiness-row > span {
+  font-weight: 800;
+}
+
+.readiness-empty {
+  margin-top: 16px;
+  padding: 14px 0;
+  color: #9f1239;
+  font-weight: 700;
+}
+
 .settings-form label {
   display: grid;
   gap: 7px;
@@ -1608,6 +1681,31 @@ p {
   color: #047857;
 }
 
+.environment-banner {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.environment-banner.error {
+  background: #fff1f2;
+  color: #9f1239;
+}
+
+.environment-banner span {
+  display: block;
+  margin-top: 2px;
+  font-weight: 600;
+}
+
+.environment-banner button {
+  white-space: nowrap;
+}
+
 .loading {
   min-height: 300px;
   display: grid;
@@ -1651,6 +1749,20 @@ p {
   .oxford-loader-grid,
   .settings-form {
     grid-template-columns: 1fr;
+  }
+
+  .readiness-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .environment-banner {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .environment-banner button {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .word-card h2 {

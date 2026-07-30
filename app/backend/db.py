@@ -8,8 +8,14 @@ from app.shared.config import get_settings
 
 settings = get_settings()
 
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, connect_args=connect_args)
+if settings.database_url.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+elif settings.database_url.startswith("postgresql"):
+    connect_args = {"connect_timeout": 5}
+else:
+    connect_args = {}
+
+engine = create_engine(settings.database_url, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

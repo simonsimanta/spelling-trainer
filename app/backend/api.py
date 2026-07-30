@@ -1,16 +1,19 @@
+import logging
 from datetime import date
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.backend import repository, schemas
+from app.backend import readiness, repository, schemas
 from app.backend.db import get_db
 from app.backend.spelling import analytics, attempts, audio, oxford, sessions, suggestions, words
 
 
+logger = logging.getLogger(__name__)
 app = FastAPI(title="Spelling Trainer API", version="1.0.0")
 
 app.add_middleware(
@@ -22,11 +25,29 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(SQLAlchemyError)
+async def database_exception_handler(_request: Request, error: SQLAlchemyError) -> JSONResponse:
+    logger.warning(
+        "Database-backed request failed (%s). Check /readiness.",
+        type(error).__name__,
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The database is unavailable. Open Settings for readiness details."},
+    )
+
+
 @app.on_event("startup")
 def startup_seed() -> None:
     db = next(get_db())
     try:
-        repository.seed_defaults(db)
+        try:
+            repository.seed_defaults(db)
+        except (SQLAlchemyError, OSError) as error:
+            logger.warning(
+                "Startup seed deferred because the database is not ready (%s). Check /readiness.",
+                type(error).__name__,
+            )
     finally:
         db.close()
 
@@ -34,6 +55,11 @@ def startup_seed() -> None:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/readiness", response_model=schemas.ReadinessReport)
+def get_readiness() -> schemas.ReadinessReport:
+    return readiness.build_readiness_report()
 
 
 @app.get("/profile", response_model=schemas.ProfileRead)

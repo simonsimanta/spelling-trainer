@@ -46,6 +46,22 @@ class SettingsUpdate(BaseModel):
     content_bulk_limit: Optional[int] = Field(default=None, ge=1, le=5000)
 
 
+class ReadinessCheck(BaseModel):
+    key: str
+    label: str
+    status: Literal["ready", "warning", "failed"]
+    required: bool
+    detail: str
+    action: Optional[str] = None
+
+
+class ReadinessReport(BaseModel):
+    status: Literal["ready", "degraded", "unavailable"]
+    database_backend: str
+    database_target: str
+    checks: List[ReadinessCheck] = Field(default_factory=list)
+
+
 class OxfordLoadStatus(BaseModel):
     target_words: int = 5000
     loaded_words: int

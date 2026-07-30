@@ -96,6 +96,20 @@ const diagnosticSession = {
   ]
 };
 
+const readyEnvironment = {
+  status: "ready",
+  database_backend: "sqlite",
+  database_target: "Local SQLite",
+  checks: [
+    { key: "api", label: "Backend API", status: "ready", required: true, detail: "The API is responding.", action: null },
+    { key: "database", label: "Database connection", status: "ready", required: true, detail: "Local SQLite accepted a test query.", action: null },
+    { key: "schema", label: "Database schema", status: "ready", required: true, detail: "Schema and migrations are current.", action: null },
+    { key: "openai", label: "OpenAI", status: "ready", required: false, detail: "An OpenAI API key is configured.", action: null },
+    { key: "oxford", label: "Oxford source PDFs", status: "ready", required: false, detail: "All Oxford source PDFs are available.", action: null },
+    { key: "audio_cache", label: "Audio cache", status: "ready", required: false, detail: "The audio cache is writable.", action: null }
+  ]
+};
+
 test("first-run dashboard exposes Diagnostic and starts a diagnostic session", async ({ page }) => {
   await page.route("**/dashboard", async (route) => {
     await route.fulfill({ json: firstRunDashboard });
@@ -140,6 +154,9 @@ test("settings shows cache status for the selected TTS variant", async ({ page }
       }
     });
   });
+  await page.route("**/readiness", async (route) => {
+    await route.fulfill({ json: readyEnvironment });
+  });
   await page.route("**/spelling/oxford/load-status", async (route) => {
     await route.fulfill({
       json: {
@@ -182,6 +199,54 @@ test("settings shows cache status for the selected TTS variant", async ({ page }
   await page.getByLabel("TTS Voice").selectOption("coral");
   await expect(audioCard).toContainText("Coral");
   await expect(audioCard).toContainText("1 / 4");
+});
+
+test("database outage shows readiness actions instead of an empty app", async ({ page }) => {
+  await page.route("**/dashboard", async (route) => {
+    await route.fulfill({ status: 503, json: { detail: "Database unavailable." } });
+  });
+  await page.route("**/settings", async (route) => {
+    await route.fulfill({ status: 503, json: { detail: "Database unavailable." } });
+  });
+  await page.route("**/readiness", async (route) => {
+    await route.fulfill({
+      json: {
+        status: "unavailable",
+        database_backend: "postgresql",
+        database_target: "Supabase PostgreSQL",
+        checks: [
+          ...readyEnvironment.checks.filter((check) => !["database", "schema"].includes(check.key)),
+          {
+            key: "database",
+            label: "Database connection",
+            status: "failed",
+            required: true,
+            detail: "Supabase PostgreSQL could not be reached.",
+            action: "Confirm the database is running and refresh DATABASE_URL, then restart the backend."
+          },
+          {
+            key: "schema",
+            label: "Database schema",
+            status: "failed",
+            required: true,
+            detail: "The schema cannot be inspected until the database connection works.",
+            action: "Restore the database connection first, then refresh this check."
+          }
+        ]
+      }
+    });
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByRole("alert").getByText("Database unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText("Supabase PostgreSQL could not be reached.")).toBeVisible();
+  await page.getByRole("button", { name: "Open Settings" }).click();
+
+  await expect(page.getByRole("heading", { name: "System Readiness" })).toBeVisible();
+  await expect(page.getByText("Required service unavailable · Supabase PostgreSQL")).toBeVisible();
+  await expect(page.getByText(/Confirm the database is running and refresh DATABASE_URL/)).toBeVisible();
+  await expect(page.getByText(/Database-backed settings are unavailable/)).toBeVisible();
 });
 
 test("audio failures show an actionable learner message", async ({ page }) => {

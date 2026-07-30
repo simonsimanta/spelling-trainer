@@ -535,6 +535,150 @@ def test_diagnostic_session_creates_personal_practice_priority() -> None:
     assert dashboard["diagnostic_accuracy"] == 0.0
 
 
+def test_explainable_priority_score_ranks_high_risk_word() -> None:
+    _seed_core_words()
+    client = _client()
+
+    db = SessionLocal()
+    try:
+        high_risk = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "receive"))
+        low_risk = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "magnificent"))
+        assert high_risk is not None
+        assert low_risk is not None
+
+        high_risk.mastery_state = "lapse"
+        high_risk.priority_score = 2.0
+        high_risk.introduced_at = datetime.utcnow() - timedelta(days=30)
+        high_review = repository._ensure_spelling_review(db, high_risk)
+        high_review.current_stage = models.SpellingStage.trouble
+        high_review.forced_correction_required = True
+        high_review.incorrect_count = 3
+        high_review.lapse_count = 2
+        high_review.due_date = date.today() - timedelta(days=1)
+        high_review.average_response_ms = 7000
+        high_review.last_attempt_at = datetime.utcnow() - timedelta(days=1)
+
+        low_risk.mastery_state = "learning"
+        low_risk.introduced_at = datetime.utcnow()
+        low_review = repository._ensure_spelling_review(db, low_risk)
+        low_review.current_stage = models.SpellingStage.learning
+        low_review.incorrect_count = 1
+        low_review.due_date = date.today() + timedelta(days=3)
+        low_review.last_attempt_at = datetime.utcnow()
+
+        pattern = db.scalar(
+            select(models.SpellingPattern).where(models.SpellingPattern.code == "ie_ei_confusion")
+        )
+        assert pattern is not None
+        pattern_stat = db.scalar(
+            select(models.SpellingUserPatternStat).where(
+                models.SpellingUserPatternStat.pattern_id == pattern.id
+            )
+        )
+        if pattern_stat is None:
+            pattern_stat = models.SpellingUserPatternStat(pattern_id=pattern.id)
+            db.add(pattern_stat)
+        pattern_stat.total_attempts = 10
+        pattern_stat.incorrect_attempts = 8
+        pattern_stat.recent_error_rate = 0.8
+
+        for attempt_text in ["recieve", "receve"]:
+            db.add(
+                models.SpellingAttempt(
+                    word_id=high_risk.id,
+                    attempt_date=date.today(),
+                    attempt_text=attempt_text,
+                    is_correct=False,
+                    mode=models.SpellingMode.exploration,
+                )
+            )
+        db.commit()
+        high_risk_id = high_risk.id
+        low_risk_id = low_risk.id
+    finally:
+        db.close()
+
+    session = client.post(
+        "/spelling/sessions",
+        json={"session_type": "practice", "target_size": 2, "exercise_type": "mixed"},
+    )
+    assert session.status_code == 200
+    items = session.json()["items"]
+    assert [item["word_id"] for item in items] == [high_risk_id, low_risk_id]
+    assert items[0]["queue_reason"] == "forced correction"
+    assert items[0]["selection_score"] > items[1]["selection_score"]
+    assert {
+        "forced_correction",
+        "diagnostic_miss",
+        "due_audit",
+        "lapses",
+        "recent_misses",
+        "pattern_weakness",
+        "spacing_delay",
+        "usefulness",
+        "recency",
+    }.issubset(items[0]["score_breakdown"])
+    assert items[0]["score_breakdown"]["forced_correction"] == 12.0
+    assert items[0]["score_breakdown"]["recent_misses"] > 0
+    assert items[0]["score_breakdown"]["pattern_weakness"] > 0
+    assert items[0]["score_breakdown"]["response_effort"] > 0
+
+    plan = client.get("/spelling/daily-plan")
+    assert plan.status_code == 200
+    plan_payload = plan.json()
+    assert plan_payload["recommended_mode"] == "practice"
+    assert plan_payload["mode_scores"]["practice"] > plan_payload["mode_scores"]["diagnostic"]
+    assert plan_payload["recommended_reason"]
+
+
+def test_stale_due_review_does_not_starve_diagnostic_coverage() -> None:
+    _seed_core_words()
+    client = _client()
+
+    db = SessionLocal()
+    try:
+        stale_due = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "magnificent"))
+        assert stale_due is not None
+        stale_due.mastery_state = "review"
+        stale_due.diagnostic_status = "passed"
+        stale_due.introduced_at = datetime.utcnow() - timedelta(days=180)
+        stale_review = repository._ensure_spelling_review(db, stale_due)
+        stale_review.current_stage = models.SpellingStage.review
+        stale_review.due_date = date.today() - timedelta(days=180)
+        stale_review.last_attempt_at = datetime.utcnow() - timedelta(days=180)
+        db.add(
+            models.SpellingAttempt(
+                word_id=stale_due.id,
+                attempt_date=date.today() - timedelta(days=180),
+                attempt_text=stale_due.term,
+                is_correct=True,
+                mode=models.SpellingMode.diagnostic,
+            )
+        )
+        db.commit()
+        stale_due_id = stale_due.id
+    finally:
+        db.close()
+
+    plan = client.get("/spelling/daily-plan")
+    assert plan.status_code == 200
+    plan_payload = plan.json()
+    assert plan_payload["recommended_mode"] == "diagnostic"
+    assert plan_payload["mode_scores"]["diagnostic"] > plan_payload["mode_scores"]["review_due"]
+
+    diagnostic = client.post(
+        "/spelling/sessions",
+        json={"session_type": "diagnostic", "target_size": 5, "exercise_type": "mixed"},
+    )
+    assert diagnostic.status_code == 200
+    items = diagnostic.json()["items"]
+    assert len(items) == 5
+    assert stale_due_id not in {item["word_id"] for item in items}
+    assert all(item["score_breakdown"]["diagnostic_coverage"] == 4.0 for item in items)
+    assert all(item["score_breakdown"]["spacing_delay"] == 0.0 for item in items)
+    assert all(item["selection_score"] > 0 for item in items)
+
+
 def test_correct_diagnostic_attempt_is_provisional_not_practice() -> None:
     _seed_core_words()
     client = _client()

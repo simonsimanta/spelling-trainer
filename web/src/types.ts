@@ -198,8 +198,14 @@ export type AttemptResult = {
     attempt?: string;
     target_word?: string;
     target_correct?: boolean;
+    target_spelling_correct?: boolean;
+    sentence_complete?: boolean;
+    sentence_similarity?: number;
     operations?: Array<Record<string, string | number | boolean>>;
   } | null;
+  target_spelling_correct?: boolean | null;
+  sentence_complete?: boolean | null;
+  sentence_similarity?: number | null;
   forced_correction_required: boolean;
   allow_next: boolean;
   mastery_state?: string | null;

@@ -122,3 +122,86 @@ test("first-run dashboard exposes Diagnostic and starts a diagnostic session", a
   await expect(page.getByText("Starter Diagnostic")).toBeVisible();
   await expect(page.getByPlaceholder("Type the spelling here...")).toBeFocused();
 });
+
+test("dictation feedback separates target spelling from sentence completeness", async ({ page }) => {
+  await page.route("**/dashboard", async (route) => {
+    await route.fulfill({ json: firstRunDashboard });
+  });
+
+  await page.route("**/spelling/sessions", async (route) => {
+    await route.fulfill({
+      json: {
+        session_id: 2,
+        session_type: "dictation",
+        total_items: 1,
+        completed_items: 0,
+        items: [
+          {
+            session_item_id: 2,
+            word_id: 1,
+            term: "definitely",
+            item_type: "sentence_dictation",
+            mode: "dictation",
+            prompt_text: "I definitely finished the task.",
+            source_reason: "recent miss",
+            queue_reason: "recent miss",
+            status: "pending",
+            audio_ready: true,
+            choices: null
+          }
+        ]
+      }
+    });
+  });
+
+  await page.route("**/spelling/attempts", async (route) => {
+    await route.fulfill({
+      json: {
+        attempt_id: 7,
+        word_id: 1,
+        term: "definitely",
+        attempt_text: "definitely",
+        is_correct: true,
+        points_awarded: 3,
+        error_pattern: null,
+        next_due_date: "2026-07-31",
+        llm_feedback: "The target spelling is correct.",
+        chunk_hint: "de-fin-ite-ly",
+        mnemonic: "Think: de-fi-nite-ly.",
+        example_sentence: "I definitely finished the task.",
+        diff_json: null,
+        sentence_diff_json: {
+          expected: "I definitely finished the task.",
+          attempt: "definitely",
+          target_word: "definitely",
+          target_correct: true,
+          target_spelling_correct: true,
+          sentence_complete: false,
+          sentence_similarity: 0.3333,
+          operations: [{ type: "delete", expected: "i" }, { type: "delete", expected: "finished the task" }]
+        },
+        target_spelling_correct: true,
+        sentence_complete: false,
+        sentence_similarity: 0.3333,
+        forced_correction_required: false,
+        allow_next: true,
+        mastery_state: "review",
+        retry_prompt: null,
+        skip_available: false
+      }
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Dictation" }).click();
+  await page.getByRole("button", { name: "Start Dictation" }).click();
+  await page.getByPlaceholder("Type the sentence here...").fill("definitely");
+  await page.getByRole("button", { name: "Submit" }).click();
+
+  const outcomes = page.getByLabel("Dictation results");
+  await expect(outcomes).toContainText("Target spelling");
+  await expect(outcomes).toContainText("Correct");
+  await expect(outcomes).toContainText("Sentence completeness");
+  await expect(outcomes).toContainText("33% match");
+  await expect(page.getByText("Target spelling correct. +3 points")).toBeVisible();
+});

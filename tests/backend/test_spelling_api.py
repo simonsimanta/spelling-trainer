@@ -7,11 +7,12 @@ os.close(db_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import OperationalError
 
-from app.backend import models, repository, schemas
-from app.backend.api import app
-from app.backend.db import Base, SessionLocal, engine
+from app.backend import models, readiness, repository, schemas
+from app.backend.api import app, startup_seed
+from app.backend.db import Base, SessionLocal, engine, get_db
 from app.backend.spelling import audio, oxford
 
 
@@ -113,6 +114,83 @@ def test_spelling_only_public_app_and_dashboard() -> None:
 
     for path in ["/categories", "/habits", "/logs", "/journal", "/summary", "/metrics"]:
         assert client.get(path).status_code == 404
+
+
+def test_readiness_reports_current_database_schema(tmp_path) -> None:
+    ready_engine = create_engine(f"sqlite:///{tmp_path / 'ready.db'}")
+    try:
+        Base.metadata.create_all(bind=ready_engine)
+        with ready_engine.begin() as connection:
+            connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+            connection.execute(
+                text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+                {"revision": readiness._expected_migration_head()},
+            )
+
+        report = readiness.build_readiness_report(ready_engine)
+        checks = {check.key: check for check in report.checks}
+
+        assert set(checks) == {"api", "database", "schema", "openai", "oxford", "audio_cache"}
+        assert checks["api"].status == "ready"
+        assert checks["database"].status == "ready"
+        assert checks["schema"].status == "ready"
+        assert report.database_backend == "sqlite"
+        assert report.database_target == "Local SQLite"
+        assert report.status in {"ready", "degraded"}
+    finally:
+        ready_engine.dispose()
+
+
+def test_readiness_and_health_when_database_is_unavailable(tmp_path, monkeypatch) -> None:
+    broken_engine = create_engine(f"sqlite:///{tmp_path / 'missing' / 'unavailable.db'}")
+    monkeypatch.setattr(readiness, "engine", broken_engine)
+    try:
+        client = _client()
+        health = client.get("/health")
+        report = client.get("/readiness")
+
+        assert health.status_code == 200
+        assert health.json() == {"status": "ok"}
+        assert report.status_code == 200
+        payload = report.json()
+        assert payload["status"] == "unavailable"
+        checks = {check["key"]: check for check in payload["checks"]}
+        assert checks["api"]["status"] == "ready"
+        assert checks["database"]["status"] == "failed"
+        assert checks["schema"]["status"] == "failed"
+        assert checks["database"]["action"]
+        assert str(tmp_path) not in checks["database"]["detail"]
+    finally:
+        broken_engine.dispose()
+
+
+def test_startup_seed_defers_database_errors(monkeypatch) -> None:
+    def unavailable_seed(_db) -> None:
+        raise OperationalError("SELECT 1", {}, Exception("database unavailable"))
+
+    monkeypatch.setattr(repository, "seed_defaults", unavailable_seed)
+
+    startup_seed()
+
+    assert _client().get("/health").json() == {"status": "ok"}
+
+
+def test_database_route_errors_return_sanitized_service_unavailable() -> None:
+    def unavailable_db():
+        raise OperationalError("SELECT 1", {}, Exception("password=do-not-expose"))
+        yield
+
+    app.dependency_overrides[get_db] = unavailable_db
+    try:
+        response = _client().get("/settings")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "The database is unavailable. Open Settings for readiness details."
+    }
+    assert "do-not-expose" not in response.text
 
 
 def test_unattempted_seed_and_due_learning_words_are_not_review_debt() -> None:

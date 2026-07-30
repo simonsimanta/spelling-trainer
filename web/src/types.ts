@@ -225,6 +225,22 @@ export type Settings = {
   content_bulk_limit: number;
 };
 
+export type ReadinessCheck = {
+  key: string;
+  label: string;
+  status: "ready" | "warning" | "failed";
+  required: boolean;
+  detail: string;
+  action?: string | null;
+};
+
+export type ReadinessReport = {
+  status: "ready" | "degraded" | "unavailable";
+  database_backend: string;
+  database_target: string;
+  checks: ReadinessCheck[];
+};
+
 export type BulkStatus = {
   total_words: number;
   generated: number;

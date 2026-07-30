@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Award,
   BarChart3,
   BookOpen,
@@ -31,6 +32,7 @@ import type {
   Exploration,
   OxfordLoadResult,
   OxfordLoadStatus,
+  ReadinessReport,
   SessionItem,
   Settings,
   SpellingSession,
@@ -314,19 +316,50 @@ function explorationEmptyState(pool: ExplorationPool, dashboard: Dashboard | nul
 export default function App() {
   const [view, setView] = useState<ViewKey>("dashboard");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [readiness, setReadiness] = useState<ReadinessReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [environmentError, setEnvironmentError] = useState<string | null>(null);
 
   async function refreshDashboard() {
     const data = await getJson<Dashboard>("/dashboard");
     setDashboard(data);
+    setError(null);
+  }
+
+  async function refreshReadiness(): Promise<ReadinessReport> {
+    const data = await getJson<ReadinessReport>("/readiness");
+    setReadiness(data);
+    setEnvironmentError(null);
+    return data;
   }
 
   useEffect(() => {
-    refreshDashboard()
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
+    async function bootstrap() {
+      let report: ReadinessReport | null = null;
+      try {
+        report = await refreshReadiness();
+      } catch {
+        // Older or unreachable backends may not expose readiness; try the main route before failing.
+      }
+
+      if (report?.status === "unavailable") return;
+
+      try {
+        await refreshDashboard();
+      } catch (err) {
+        if (!report) {
+          setEnvironmentError("The backend API is unavailable. Start the backend, then refresh this page.");
+        } else {
+          setError(err instanceof Error ? err.message : "Dashboard failed to load.");
+        }
+      }
+    }
+
+    bootstrap().finally(() => setLoading(false));
   }, []);
+
+  const databaseFailure = readiness?.checks.find((check) => check.key === "database" && check.status === "failed");
 
   return (
     <div className="app-shell">
@@ -360,6 +393,24 @@ export default function App() {
       </aside>
 
       <main className="content">
+        {readiness?.status === "unavailable" ? (
+          <div className="environment-banner error" role="alert">
+            <AlertTriangle size={20} />
+            <div>
+              <strong>Database unavailable</strong>
+              <span>{databaseFailure?.detail ?? "The app cannot reach its configured database."}</span>
+            </div>
+            <button className="secondary" onClick={() => setView("settings")}>Open Settings</button>
+          </div>
+        ) : environmentError ? (
+          <div className="environment-banner error" role="alert">
+            <AlertTriangle size={20} />
+            <div>
+              <strong>Backend API unavailable</strong>
+              <span>{environmentError}</span>
+            </div>
+          </div>
+        ) : null}
         {error ? <div className="banner error">{error}</div> : null}
         {loading ? (
           <div className="loading">
@@ -376,7 +427,13 @@ export default function App() {
             {view === "wordLists" && <WordListsView />}
             {view === "progress" && <ProgressView dashboard={dashboard} />}
             {view === "achievements" && <AchievementsView />}
-            {view === "settings" && <SettingsView onRefresh={refreshDashboard} />}
+            {view === "settings" && (
+              <SettingsView
+                readiness={readiness}
+                onRefresh={refreshDashboard}
+                onRefreshReadiness={refreshReadiness}
+              />
+            )}
           </>
         )}
       </main>
@@ -1609,7 +1666,15 @@ function AchievementsView() {
   );
 }
 
-function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
+function SettingsView({
+  readiness,
+  onRefresh,
+  onRefreshReadiness
+}: {
+  readiness: ReadinessReport | null;
+  onRefresh: () => Promise<void>;
+  onRefreshReadiness: () => Promise<ReadinessReport>;
+}) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [oxfordStatus, setOxfordStatus] = useState<OxfordLoadStatus | null>(null);
   const [contentStatus, setContentStatus] = useState<BulkStatus | null>(null);
@@ -1620,6 +1685,8 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
   const [oxfordResult, setOxfordResult] = useState<OxfordLoadResult | null>(null);
   const [results, setResults] = useState<Partial<Record<"content" | "audio", BulkGenerateResult>>>({});
   const [message, setMessage] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [checkingReadiness, setCheckingReadiness] = useState(false);
 
   async function load(selectedSettings?: Settings) {
     const activeSettings = selectedSettings ?? await getJson<Settings>("/settings");
@@ -1633,6 +1700,24 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
       model: activeSettings.tts_model
     });
     setAudioStatus(await getJson<BulkStatus>(`/spelling/audio/bulk-status?${audioParams.toString()}`));
+    setSettingsError(null);
+  }
+
+  async function refreshEnvironment() {
+    setCheckingReadiness(true);
+    try {
+      const report = await onRefreshReadiness();
+      if (report.status === "unavailable") {
+        setSettings(null);
+        setSettingsError("Database-backed settings are unavailable until the required database checks pass.");
+      } else if (!settings) {
+        await load();
+      }
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : "Environment readiness could not be checked.");
+    } finally {
+      setCheckingReadiness(false);
+    }
   }
 
   async function save(event: FormEvent) {
@@ -1701,13 +1786,30 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
   }
 
   useEffect(() => {
-    load().catch(() => undefined);
+    refreshEnvironment().catch(() => undefined);
   }, []);
 
-  if (!settings) return null;
+  if (!settings) {
+    return (
+      <section className="panel full">
+        <h1>Settings</h1>
+        <EnvironmentReadiness
+          report={readiness}
+          refreshing={checkingReadiness}
+          onRefresh={refreshEnvironment}
+        />
+        {settingsError ? <div className="banner error">{settingsError}</div> : null}
+      </section>
+    );
+  }
   return (
     <section className="panel full">
       <h1>Settings</h1>
+      <EnvironmentReadiness
+        report={readiness}
+        refreshing={checkingReadiness}
+        onRefresh={refreshEnvironment}
+      />
       <form className="settings-form" onSubmit={save}>
         <label>Theme
           <select value={settings.theme} onChange={(event) => setSettings({ ...settings, theme: event.target.value })}>
@@ -1813,6 +1915,63 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
           onConfirm={() => generate(preview.kind)}
         />
       ) : null}
+    </section>
+  );
+}
+
+function EnvironmentReadiness({
+  report,
+  refreshing,
+  onRefresh
+}: {
+  report: ReadinessReport | null;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const summary = report?.status === "ready"
+    ? "Environment ready"
+    : report?.status === "degraded"
+      ? "Optional setup needs attention"
+      : report?.status === "unavailable"
+        ? "Required service unavailable"
+        : "Readiness not checked";
+
+  return (
+    <section className="readiness-section" aria-labelledby="readiness-heading">
+      <div className="readiness-head">
+        <div>
+          <p className="eyebrow">Environment</p>
+          <h2 id="readiness-heading">System Readiness</h2>
+          <p>
+            {summary}
+            {report ? ` · ${report.database_target}` : ""}
+          </p>
+        </div>
+        <button className="secondary" disabled={refreshing} onClick={onRefresh}>
+          <RefreshCcw className={refreshing ? "spin" : undefined} size={16} />
+          {refreshing ? "Checking" : "Refresh"}
+        </button>
+      </div>
+      {report ? (
+        <div className="readiness-list">
+          {report.checks.map((check) => {
+            const Icon = check.status === "ready" ? CheckCircle2 : check.status === "warning" ? AlertTriangle : XCircle;
+            return (
+              <div className={`readiness-row ${check.status}`} key={check.key}>
+                <Icon size={20} />
+                <div>
+                  <strong>{check.label}</strong>
+                  <p>{check.detail}</p>
+                  {check.action ? <small><b>Next:</b> {check.action}</small> : null}
+                </div>
+                <span>{title(check.status)}</span>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="readiness-empty">The backend readiness report is unavailable.</div>
+      )}
     </section>
   );
 }

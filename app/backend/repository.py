@@ -572,6 +572,26 @@ def _active_learning_word_filter() -> Tuple[Any, Any]:
     )
 
 
+def _actionable_review_filter(as_of: date) -> Any:
+    return or_(
+        models.SpellingReview.forced_correction_required.is_(True),
+        models.SpellingWord.diagnostic_status == "missed",
+        models.SpellingReview.incorrect_count > 0,
+        models.SpellingReview.lapse_count > 0,
+        models.SpellingReview.current_stage == models.SpellingStage.trouble,
+        (
+            (models.SpellingWord.mastery_state == "known_provisional")
+            & (models.SpellingReview.due_date <= as_of)
+        ),
+        (
+            models.SpellingReview.current_stage.in_(
+                [models.SpellingStage.review, models.SpellingStage.mastered]
+            )
+            & (models.SpellingReview.due_date <= as_of)
+        ),
+    )
+
+
 def _state_for_word(word: models.SpellingWord, review: Optional[models.SpellingReview] = None) -> str:
     if word.mastery_state:
         return word.mastery_state
@@ -1118,21 +1138,7 @@ def _review_priority_words(db: Session, target_size: int, mode: models.SpellingS
     selected: List[models.SpellingWord] = []
     used: set[int] = set()
     due_today = date.today()
-    review_candidate = or_(
-        models.SpellingReview.forced_correction_required.is_(True),
-        models.SpellingWord.diagnostic_status == "missed",
-        models.SpellingReview.incorrect_count > 0,
-        models.SpellingReview.lapse_count > 0,
-        models.SpellingReview.current_stage == models.SpellingStage.trouble,
-        (
-            (models.SpellingWord.mastery_state == "known_provisional")
-            & (models.SpellingReview.due_date <= due_today)
-        ),
-        (
-            (models.SpellingReview.current_stage == models.SpellingStage.review)
-            & (models.SpellingReview.due_date <= due_today)
-        ),
-    )
+    review_candidate = _actionable_review_filter(due_today)
 
     def add_words(rows: Iterable[models.SpellingWord]) -> None:
         for word in rows:
@@ -1911,6 +1917,7 @@ def get_spelling_overview(db: Session, as_of: date) -> schemas.SpellingOverview:
         select(func.count(models.SpellingReview.id))
         .join(models.SpellingWord, models.SpellingReview.word_id == models.SpellingWord.id)
         .where(*_active_learning_word_filter())
+        .where(_actionable_review_filter(as_of))
         .where(models.SpellingReview.due_date <= as_of)
     ) or 0
     hard_words = db.scalar(
@@ -1985,6 +1992,7 @@ def get_spelling_analytics(db: Session) -> schemas.SpellingAnalyticsOut:
 
 
 def get_core5k_overview(db: Session) -> schemas.Core5KOverviewOut:
+    today = date.today()
     total_words = db.scalar(
         select(func.count(func.distinct(models.SpellingWord.id)))
         .select_from(models.SpellingWord)
@@ -2005,7 +2013,11 @@ def get_core5k_overview(db: Session) -> schemas.Core5KOverviewOut:
         )
     ) or 0
     due_today_words = db.scalar(
-        select(func.count(func.distinct(models.SpellingReview.word_id))).where(models.SpellingReview.due_date <= date.today())
+        select(func.count(func.distinct(models.SpellingReview.word_id)))
+        .join(models.SpellingWord, models.SpellingReview.word_id == models.SpellingWord.id)
+        .where(*_active_learning_word_filter())
+        .where(_actionable_review_filter(today))
+        .where(models.SpellingReview.due_date <= today)
     ) or 0
     return schemas.Core5KOverviewOut(
         total_words=total_words,
@@ -2163,26 +2175,13 @@ def _dashboard_pattern_metrics(db: Session, limit: int = 5) -> List[schemas.Dash
 
 
 def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
+    today = date.today()
     oxford_word_ids = (
         select(models.SpellingWordSource.word_id)
         .where(models.SpellingWordSource.source_name.in_(list(OXFORD_SOURCE_NAMES)))
         .distinct()
     )
-    review_candidate = or_(
-        models.SpellingReview.forced_correction_required.is_(True),
-        models.SpellingWord.diagnostic_status == "missed",
-        models.SpellingReview.incorrect_count > 0,
-        models.SpellingReview.lapse_count > 0,
-        models.SpellingReview.current_stage == models.SpellingStage.trouble,
-        (
-            (models.SpellingWord.mastery_state == "known_provisional")
-            & (models.SpellingReview.due_date <= date.today())
-        ),
-        (
-            (models.SpellingReview.current_stage == models.SpellingStage.review)
-            & (models.SpellingReview.due_date <= date.today())
-        ),
-    )
+    review_candidate = _actionable_review_filter(today)
 
     oxford_loaded_words = db.scalar(select(func.count()).select_from(oxford_word_ids.subquery())) or 0
     oxford_explored_words = db.scalar(
@@ -2226,7 +2225,7 @@ def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
         .join(models.SpellingWord, models.SpellingReview.word_id == models.SpellingWord.id)
         .where(*_active_learning_word_filter())
         .where(models.SpellingWord.mastery_state == "known_provisional")
-        .where(models.SpellingReview.due_date <= date.today())
+        .where(models.SpellingReview.due_date <= today)
     ) or 0
     learning_words = db.scalar(
         select(func.count(func.distinct(models.SpellingReview.word_id))).where(
@@ -2239,13 +2238,18 @@ def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
         )
     ) or 0
     due_today_words = db.scalar(
-        select(func.count(func.distinct(models.SpellingReview.word_id))).where(models.SpellingReview.due_date <= date.today())
+        select(func.count(func.distinct(models.SpellingReview.word_id)))
+        .join(models.SpellingWord, models.SpellingReview.word_id == models.SpellingWord.id)
+        .where(*_active_learning_word_filter())
+        .where(review_candidate)
+        .where(models.SpellingReview.due_date <= today)
     ) or 0
     review_debt_words = db.scalar(
         select(func.count(func.distinct(models.SpellingReview.word_id)))
         .join(models.SpellingWord, models.SpellingReview.word_id == models.SpellingWord.id)
         .where(*_active_learning_word_filter())
-        .where(models.SpellingReview.due_date < date.today())
+        .where(review_candidate)
+        .where(models.SpellingReview.due_date < today)
     ) or 0
     forced_correction_words = db.scalar(
         select(func.count(func.distinct(models.SpellingReview.word_id))).where(

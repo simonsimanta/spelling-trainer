@@ -115,6 +115,94 @@ def test_spelling_only_public_app_and_dashboard() -> None:
         assert client.get(path).status_code == 404
 
 
+def test_unattempted_seed_and_due_learning_words_are_not_review_debt() -> None:
+    _seed_core_words()
+    client = _client()
+
+    db = SessionLocal()
+    try:
+        word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "definitely"))
+        assert word is not None
+        review = repository._ensure_spelling_review(db, word)
+        review.current_stage = models.SpellingStage.learning
+        review.due_date = date.today() - timedelta(days=7)
+        db.commit()
+    finally:
+        db.close()
+
+    dashboard = client.get("/dashboard").json()
+    assert dashboard["overview"]["due_today"] == 0
+    assert dashboard["core5k"]["due_today_words"] == 0
+    assert dashboard["stats"]["due_today_words"] == 0
+    assert dashboard["stats"]["review_debt_words"] == 0
+    assert dashboard["stats"]["practice_queue_words"] == 0
+
+    practice = client.post(
+        "/spelling/sessions",
+        json={"session_type": "practice", "target_size": 10, "exercise_type": "mixed"},
+    )
+    assert practice.status_code == 200
+    assert practice.json()["items"] == []
+
+
+def test_actionable_review_words_match_due_metrics_and_practice_queue() -> None:
+    _seed_core_words()
+    client = _client()
+
+    db = SessionLocal()
+    try:
+        learning_word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "definitely"))
+        review_word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "magnificent"))
+        mastered_word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "accommodation"))
+        future_mistake = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "knowledge"))
+        assert learning_word is not None
+        assert review_word is not None
+        assert mastered_word is not None
+        assert future_mistake is not None
+
+        learning_review = repository._ensure_spelling_review(db, learning_word)
+        learning_review.current_stage = models.SpellingStage.learning
+        learning_review.due_date = date.today() - timedelta(days=7)
+
+        review_word.mastery_state = "review"
+        due_review = repository._ensure_spelling_review(db, review_word)
+        due_review.current_stage = models.SpellingStage.review
+        due_review.due_date = date.today()
+
+        mastered_word.mastery_state = "stable_known"
+        due_mastered = repository._ensure_spelling_review(db, mastered_word)
+        due_mastered.current_stage = models.SpellingStage.mastered
+        due_mastered.due_date = date.today() - timedelta(days=1)
+
+        future_review = repository._ensure_spelling_review(db, future_mistake)
+        future_review.current_stage = models.SpellingStage.learning
+        future_review.incorrect_count = 1
+        future_review.due_date = date.today() + timedelta(days=3)
+        db.commit()
+
+        expected_queue_ids = {review_word.id, mastered_word.id, future_mistake.id}
+        excluded_learning_id = learning_word.id
+    finally:
+        db.close()
+
+    dashboard = client.get("/dashboard").json()
+    assert dashboard["overview"]["due_today"] == 2
+    assert dashboard["core5k"]["due_today_words"] == 2
+    assert dashboard["stats"]["due_today_words"] == 2
+    assert dashboard["stats"]["review_debt_words"] == 1
+    assert dashboard["stats"]["practice_queue_words"] == 3
+    assert dashboard["stats"]["dictation_ready_words"] == 3
+
+    practice = client.post(
+        "/spelling/sessions",
+        json={"session_type": "practice", "target_size": 10, "exercise_type": "mixed"},
+    )
+    assert practice.status_code == 200
+    practice_ids = {item["word_id"] for item in practice.json()["items"]}
+    assert practice_ids == expected_queue_ids
+    assert excluded_learning_id not in practice_ids
+
+
 def test_dashboard_stats_keep_llm_suggestions_separate_from_oxford_coverage() -> None:
     _seed_core_words()
     client = _client()

@@ -238,6 +238,8 @@ class SpellingSessionItem(Base):
         SAEnum(SpellingSessionItemType, name="spelling_session_item_type", native_enum=False), nullable=False
     )
     source_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    selection_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    score_breakdown: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     order_index: Mapped[int] = mapped_column(Integer, nullable=False)
     choices: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     status: Mapped[SpellingSessionItemStatus] = mapped_column(

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 import json
@@ -42,6 +43,7 @@ PROVISIONAL_AUDIT_DAYS = 14
 STABLE_AUDIT_DAYS = 30
 STABLE_MASTERY_STATES = {"stable_known", "mastered"}
 DIAGNOSTIC_PRIORITY_BOOST = 1.0
+RECENT_MISS_WINDOW_DAYS = 14
 
 COMMON_CONFUSION_WORDS = [
     "definitely",
@@ -59,6 +61,20 @@ COMMON_CONFUSION_WORDS = [
     "accommodation",
     "magnificent",
 ]
+
+
+@dataclass(frozen=True)
+class SelectionScore:
+    total: float
+    reason: str
+    breakdown: Dict[str, float]
+
+
+@dataclass(frozen=True)
+class RankedWord:
+    word: models.SpellingWord
+    score: SelectionScore
+
 
 CONFUSION_GROUPS = [
     ["definitely", "separate", "necessary", "embarrass", "accommodate", "occasionally"],
@@ -592,6 +608,31 @@ def _actionable_review_filter(as_of: date) -> Any:
     )
 
 
+def _is_actionable_review(
+    word: models.SpellingWord,
+    review: models.SpellingReview,
+    as_of: date,
+) -> bool:
+    return bool(
+        review.forced_correction_required
+        or word.diagnostic_status == "missed"
+        or review.incorrect_count > 0
+        or review.lapse_count > 0
+        or review.current_stage == models.SpellingStage.trouble
+        or (
+            word.mastery_state == "known_provisional"
+            and review.due_date <= as_of
+        )
+        or (
+            review.current_stage in {
+                models.SpellingStage.review,
+                models.SpellingStage.mastered,
+            }
+            and review.due_date <= as_of
+        )
+    )
+
+
 def _state_for_word(word: models.SpellingWord, review: Optional[models.SpellingReview] = None) -> str:
     if word.mastery_state:
         return word.mastery_state
@@ -606,26 +647,6 @@ def _is_stable_state(state: Optional[str]) -> bool:
 
 def _is_due_provisional_audit(word: models.SpellingWord, review: models.SpellingReview) -> bool:
     return word.mastery_state == "known_provisional" and review.due_date <= date.today()
-
-
-def _queue_reason(word: models.SpellingWord, review: Optional[models.SpellingReview]) -> str:
-    if not review:
-        return "review"
-    if review.forced_correction_required:
-        return "forced correction"
-    if word.diagnostic_status == "missed":
-        return "diagnostic miss"
-    if word.mastery_state == "lapse":
-        return "lapse repair"
-    if _is_due_provisional_audit(word, review):
-        return "delayed audit"
-    if review.lapse_count > 0:
-        return "lapse repair"
-    if review.incorrect_count > 0 or review.current_stage == models.SpellingStage.trouble:
-        return "missed spelling"
-    if review.due_date <= date.today():
-        return "due review"
-    return "review"
 
 
 def _word_usefulness_score(word: models.SpellingWord) -> float:
@@ -644,6 +665,226 @@ def _word_usefulness_score(word: models.SpellingWord) -> float:
     return round(score, 4)
 
 
+def _inferred_pattern_codes(word: models.SpellingWord) -> set[str]:
+    codes: set[str] = set()
+    term = word.term.lower()
+    if "ie" in term or "ei" in term:
+        codes.add("ie_ei_confusion")
+    if any(left == right for left, right in zip(term, term[1:])):
+        codes.add("double_consonant")
+    return codes
+
+
+def _selection_signal_maps(
+    db: Session,
+    words: List[models.SpellingWord],
+    as_of: date,
+) -> Tuple[Dict[int, models.SpellingReview], Dict[int, int], Dict[int, float]]:
+    word_ids = [word.id for word in words]
+    if not word_ids:
+        return {}, {}, {}
+
+    reviews = {
+        review.word_id: review
+        for review in db.scalars(
+            select(models.SpellingReview).where(models.SpellingReview.word_id.in_(word_ids))
+        ).all()
+    }
+    recent_miss_rows = db.execute(
+        select(models.SpellingAttempt.word_id, func.count(models.SpellingAttempt.id))
+        .where(
+            models.SpellingAttempt.word_id.in_(word_ids),
+            models.SpellingAttempt.attempt_date >= as_of - timedelta(days=RECENT_MISS_WINDOW_DAYS),
+            models.SpellingAttempt.is_correct.is_(False),
+            models.SpellingAttempt.retry_index == 0,
+        )
+        .group_by(models.SpellingAttempt.word_id)
+    ).all()
+    recent_misses = {word_id: int(count or 0) for word_id, count in recent_miss_rows}
+
+    pattern_rates = {
+        code: float(error_rate or 0.0)
+        for code, error_rate in db.execute(
+            select(models.SpellingPattern.code, models.SpellingUserPatternStat.recent_error_rate)
+            .join(
+                models.SpellingUserPatternStat,
+                models.SpellingUserPatternStat.pattern_id == models.SpellingPattern.id,
+            )
+        ).all()
+    }
+    linked_patterns: Dict[int, List[Tuple[str, float]]] = {}
+    for word_id, code, strength in db.execute(
+        select(
+            models.SpellingWordPattern.word_id,
+            models.SpellingPattern.code,
+            models.SpellingWordPattern.strength,
+        )
+        .join(
+            models.SpellingPattern,
+            models.SpellingPattern.id == models.SpellingWordPattern.pattern_id,
+        )
+        .where(models.SpellingWordPattern.word_id.in_(word_ids))
+    ).all():
+        linked_patterns.setdefault(word_id, []).append((code, float(strength or 1.0)))
+
+    pattern_weakness: Dict[int, float] = {}
+    for word in words:
+        candidates = [
+            pattern_rates.get(code, 0.0)
+            for code in _inferred_pattern_codes(word)
+        ]
+        candidates.extend(
+            pattern_rates.get(code, 0.0) * strength
+            for code, strength in linked_patterns.get(word.id, [])
+        )
+        pattern_weakness[word.id] = round(max(candidates, default=0.0), 4)
+    return reviews, recent_misses, pattern_weakness
+
+
+def _selection_recency_score(
+    word: models.SpellingWord,
+    review: Optional[models.SpellingReview],
+    now: datetime,
+) -> float:
+    last_seen = review.last_attempt_at if review and review.last_attempt_at else word.last_seen_at
+    if last_seen is None:
+        return 1.5
+    days_since = max((now - last_seen).days, 0)
+    if days_since <= 1:
+        return -0.75
+    if days_since <= 3:
+        return -0.25
+    if days_since >= 30:
+        return 1.25
+    if days_since >= 14:
+        return 0.8
+    if days_since >= 7:
+        return 0.4
+    return 0.0
+
+
+def _selection_reason(
+    word: models.SpellingWord,
+    review: Optional[models.SpellingReview],
+    mode: models.SpellingSessionType,
+    breakdown: Dict[str, float],
+    as_of: date,
+) -> str:
+    if mode == models.SpellingSessionType.diagnostic:
+        return _diagnostic_reason(word)
+    if review and review.forced_correction_required:
+        return "forced correction"
+    if word.diagnostic_status == "missed":
+        return "diagnostic miss"
+    if word.mastery_state == "lapse" or (review and review.lapse_count > 0):
+        return "lapse repair"
+    if (
+        review
+        and word.mastery_state == "known_provisional"
+        and review.due_date <= as_of
+    ):
+        return "delayed audit"
+    if breakdown["recent_misses"] > 0 or (review and review.incorrect_count > 0):
+        return "missed spelling"
+    if breakdown["pattern_weakness"] >= 1.0:
+        return "weak spelling pattern"
+    if review and review.due_date <= as_of:
+        return "due review"
+    return "review"
+
+
+def _selection_score(
+    word: models.SpellingWord,
+    review: Optional[models.SpellingReview],
+    mode: models.SpellingSessionType,
+    recent_misses: int,
+    pattern_weakness: float,
+    as_of: date,
+    now: datetime,
+) -> SelectionScore:
+    breakdown = {
+        "forced_correction": 12.0 if review and review.forced_correction_required else 0.0,
+        "diagnostic_miss": 6.0 if word.diagnostic_status == "missed" else 0.0,
+        "due_audit": 0.0,
+        "lapses": 0.0,
+        "miss_history": min(float(review.incorrect_count) * 0.75, 3.0) if review else 0.0,
+        "recent_misses": min(float(recent_misses) * 1.5, 4.5),
+        "pattern_weakness": round(pattern_weakness * 3.0, 4),
+        "spacing_delay": 0.0,
+        "usefulness": _word_usefulness_score(word),
+        "stored_priority": min(max(float(word.priority_score or 0.0), 0.0), 3.0),
+        "response_effort": 0.0,
+        "recency": _selection_recency_score(word, review, now),
+        "diagnostic_coverage": (
+            4.0
+            if mode == models.SpellingSessionType.diagnostic and word.diagnostic_status == "untested"
+            else 0.0
+        ),
+    }
+    if review:
+        lapse_count = max(review.lapse_count, 1 if word.mastery_state == "lapse" else 0)
+        breakdown["lapses"] = min(float(lapse_count) * 2.0, 6.0)
+        if review.due_date <= as_of and _is_actionable_review(word, review, as_of):
+            overdue_days = max((as_of - review.due_date).days, 0)
+            breakdown["spacing_delay"] = round(min(3.0, 0.75 + (overdue_days / 14)), 4)
+            if word.mastery_state == "known_provisional":
+                breakdown["due_audit"] = 4.0
+            elif review.current_stage == models.SpellingStage.mastered:
+                breakdown["due_audit"] = 2.5
+            elif review.current_stage == models.SpellingStage.review:
+                breakdown["due_audit"] = 1.5
+        if review.average_response_ms and review.average_response_ms > 3000:
+            breakdown["response_effort"] = round(
+                min((review.average_response_ms - 3000) / 4000, 1.5),
+                4,
+            )
+    breakdown = {key: round(value, 4) for key, value in breakdown.items()}
+    reason = _selection_reason(word, review, mode, breakdown, as_of)
+    return SelectionScore(
+        total=round(sum(breakdown.values()), 4),
+        reason=reason,
+        breakdown=breakdown,
+    )
+
+
+def _rank_words(
+    db: Session,
+    words: List[models.SpellingWord],
+    mode: models.SpellingSessionType,
+    as_of: Optional[date] = None,
+) -> List[RankedWord]:
+    scoring_date = as_of or date.today()
+    now = datetime.utcnow()
+    reviews, recent_misses, pattern_weakness = _selection_signal_maps(
+        db,
+        words,
+        scoring_date,
+    )
+    ranked = [
+        RankedWord(
+            word=word,
+            score=_selection_score(
+                word,
+                reviews.get(word.id),
+                mode,
+                recent_misses.get(word.id, 0),
+                pattern_weakness.get(word.id, 0.0),
+                scoring_date,
+                now,
+            ),
+        )
+        for word in words
+    ]
+    return sorted(
+        ranked,
+        key=lambda item: (
+            -item.score.total,
+            item.word.frequency_rank or 999999,
+            item.word.term,
+        ),
+    )
+
+
 def _diagnostic_reason(word: models.SpellingWord) -> str:
     cefr = (word.cefr_level or "").upper()
     if word.source in {"llm", "llm_suggestion"} or word.level == "suggested":
@@ -659,13 +900,22 @@ def _diagnostic_reason(word: models.SpellingWord) -> str:
     return "diagnostic sample"
 
 
-def _diagnostic_candidate_words(db: Session, target_size: int, level: str = "all") -> List[models.SpellingWord]:
+def _diagnostic_candidate_words(db: Session, target_size: int, level: str = "all") -> List[RankedWord]:
     seed_spelling_defaults(db)
+    today = date.today()
     attempted_ids = set(
         db.scalars(
             select(models.SpellingAttempt.word_id)
             .where(models.SpellingAttempt.mode == models.SpellingMode.diagnostic)
             .distinct()
+        ).all()
+    )
+    actionable_review_ids = set(
+        db.scalars(
+            select(models.SpellingReview.word_id)
+            .join(models.SpellingWord, models.SpellingReview.word_id == models.SpellingWord.id)
+            .where(*_active_learning_word_filter())
+            .where(_actionable_review_filter(today))
         ).all()
     )
     stmt = (
@@ -679,16 +929,12 @@ def _diagnostic_candidate_words(db: Session, target_size: int, level: str = "all
             stmt = stmt.where(models.SpellingWord.cefr_level == normalized_level)
         else:
             stmt = stmt.where(models.SpellingWord.level == level)
-    words = [word for word in db.scalars(stmt).all() if word.id not in attempted_ids]
-    words.sort(
-        key=lambda word: (
-            word.diagnostic_status != "untested",
-            -_word_usefulness_score(word),
-            word.frequency_rank or 999999,
-            word.term,
-        )
-    )
-    return words[:target_size]
+    words = [
+        word
+        for word in db.scalars(stmt).all()
+        if word.id not in attempted_ids and word.id not in actionable_review_ids
+    ]
+    return _rank_words(db, words, models.SpellingSessionType.diagnostic, today)[:target_size]
 
 
 def _word_has_oxford_source() -> Any:
@@ -1134,69 +1380,23 @@ def get_achievements(db: Session) -> List[models.Achievement]:
     return list(db.scalars(select(models.Achievement).order_by(models.Achievement.category, models.Achievement.id)).all())
 
 
-def _review_priority_words(db: Session, target_size: int, mode: models.SpellingSessionType) -> List[models.SpellingWord]:
-    selected: List[models.SpellingWord] = []
-    used: set[int] = set()
+def _review_priority_words(db: Session, target_size: int, mode: models.SpellingSessionType) -> List[RankedWord]:
     due_today = date.today()
     review_candidate = _actionable_review_filter(due_today)
-
-    def add_words(rows: Iterable[models.SpellingWord]) -> None:
-        for word in rows:
-            if len(selected) >= target_size:
-                break
-            if word.id in used:
-                continue
-            used.add(word.id)
-            selected.append(word)
-
-    forced = (
-        select(models.SpellingWord)
-        .join(models.SpellingReview, models.SpellingReview.word_id == models.SpellingWord.id)
-        .where(*_active_learning_word_filter())
-        .where(models.SpellingReview.forced_correction_required.is_(True))
-        .order_by(models.SpellingReview.updated_at.asc())
-        .limit(target_size)
-    )
-    add_words(db.scalars(forced).all())
-
-    if mode in {models.SpellingSessionType.practice, models.SpellingSessionType.fix_mistakes}:
-        mistakes = (
-            select(models.SpellingWord)
-            .join(models.SpellingReview, models.SpellingReview.word_id == models.SpellingWord.id)
-            .where(*_active_learning_word_filter())
-            .where(
-                or_(
-                    models.SpellingReview.incorrect_count > 0,
-                    models.SpellingReview.lapse_count > 0,
-                    models.SpellingReview.current_stage == models.SpellingStage.trouble,
-                    models.SpellingWord.diagnostic_status == "missed",
-                )
-            )
-            .order_by(
-                models.SpellingWord.priority_score.desc(),
-                models.SpellingReview.incorrect_count.desc(),
-                models.SpellingReview.due_date.asc(),
-            )
-            .limit(target_size)
-        )
-        add_words(db.scalars(mistakes).all())
-
-    due = (
+    stmt = (
         select(models.SpellingWord)
         .join(models.SpellingReview, models.SpellingReview.word_id == models.SpellingWord.id)
         .where(*_active_learning_word_filter())
         .where(review_candidate)
-        .where(models.SpellingReview.due_date <= due_today)
-        .order_by(
-            models.SpellingReview.forced_correction_required.desc(),
-            models.SpellingWord.priority_score.desc(),
-            models.SpellingReview.due_date.asc(),
-            models.SpellingReview.incorrect_count.desc(),
-        )
-        .limit(target_size)
     )
-    add_words(db.scalars(due).all())
-    return selected[:target_size]
+    if mode == models.SpellingSessionType.review_due:
+        stmt = stmt.where(
+            or_(
+                models.SpellingReview.forced_correction_required.is_(True),
+                models.SpellingReview.due_date <= due_today,
+            )
+        )
+    return _rank_words(db, list(db.scalars(stmt).all()), mode)[:target_size]
 
 
 def _scramble(word: str) -> str:
@@ -1262,7 +1462,6 @@ def _session_item_to_schema(item: models.SpellingSessionItem) -> schemas.Spellin
     term = item.word.term if item.word else item.prompt_text
     mode = item.session.session_type.value if item.session else models.SpellingMode.practice.value
     content = item.word.content_cache if item.word else None
-    review = item.word.reviews[0] if item.word and item.word.reviews else None
     return schemas.SpellingSessionItemOut(
         session_item_id=item.id,
         word_id=item.word_id,
@@ -1271,13 +1470,9 @@ def _session_item_to_schema(item: models.SpellingSessionItem) -> schemas.Spellin
         mode=mode,
         prompt_text=item.prompt_text,
         source_reason=item.source_reason,
-        queue_reason=(
-            item.source_reason
-            if item.session and item.session.session_type == models.SpellingSessionType.diagnostic
-            else _queue_reason(item.word, review)
-            if item.word
-            else item.source_reason
-        ),
+        queue_reason=item.source_reason,
+        selection_score=item.selection_score,
+        score_breakdown=dict(item.score_breakdown or {}),
         status=item.status.value,
         audio_ready=True,
         choices=item.choices,
@@ -1304,31 +1499,35 @@ def create_spelling_session(db: Session, payload: schemas.SpellingSessionCreate)
     db.flush()
 
     if session_type == models.SpellingSessionType.diagnostic:
-        words = _diagnostic_candidate_words(db, payload.target_size, payload.level)
+        ranked_words = _diagnostic_candidate_words(db, payload.target_size, payload.level)
     elif session_type in {models.SpellingSessionType.learn_new, models.SpellingSessionType.exploration, models.SpellingSessionType.core_5k}:
         words = _target_oxford_words(db, limit=payload.target_size)
         words = [word for word in words if not word.known_skipped][: payload.target_size]
+        ranked_words = [
+            RankedWord(
+                word=word,
+                score=SelectionScore(total=0.0, reason=session_type.value, breakdown={}),
+            )
+            for word in words
+        ]
     else:
-        words = _review_priority_words(db, payload.target_size, session_type)
+        ranked_words = _review_priority_words(db, payload.target_size, session_type)
 
-    for idx, word in enumerate(words):
+    words = [ranked.word for ranked in ranked_words]
+    for idx, ranked in enumerate(ranked_words):
+        word = ranked.word
         item_type = _exercise_type_for(idx, payload.exercise_type, session_type)
         if session_type in {models.SpellingSessionType.learn_new, models.SpellingSessionType.exploration, models.SpellingSessionType.core_5k}:
             item_type = models.SpellingSessionItemType.core_word
-        review = _ensure_spelling_review(db, word)
-        source_reason = (
-            _diagnostic_reason(word)
-            if session_type == models.SpellingSessionType.diagnostic
-            else session_type.value
-            if session_type in {models.SpellingSessionType.learn_new, models.SpellingSessionType.exploration, models.SpellingSessionType.core_5k}
-            else _queue_reason(word, review)
-        )
+        _ensure_spelling_review(db, word)
         item = models.SpellingSessionItem(
             session_id=session.id,
             word_id=word.id,
             prompt_text=_prompt_for(word, item_type),
             item_type=item_type,
-            source_reason=source_reason,
+            source_reason=ranked.score.reason,
+            selection_score=ranked.score.total,
+            score_breakdown=ranked.score.breakdown,
             order_index=idx,
             choices=_choice_variants(word.term) if item_type in {models.SpellingSessionItemType.spelling_quiz, models.SpellingSessionItemType.choose_correct} else None,
         )
@@ -2053,43 +2252,97 @@ def get_spelling_modes_overview(db: Session) -> schemas.SpellingModesOverviewOut
 
 
 def get_spelling_daily_plan(db: Session) -> schemas.SpellingDailyPlanOut:
+    today = date.today()
+    review_candidate = _actionable_review_filter(today)
     due_reviews = db.scalar(
         select(func.count(models.SpellingReview.id))
         .join(models.SpellingWord, models.SpellingReview.word_id == models.SpellingWord.id)
         .where(*_active_learning_word_filter())
-        .where(models.SpellingReview.due_date <= date.today())
+        .where(review_candidate)
+        .where(models.SpellingReview.due_date <= today)
     ) or 0
     mistake_words = db.scalar(
         select(func.count(models.SpellingReview.id))
         .join(models.SpellingWord, models.SpellingReview.word_id == models.SpellingWord.id)
         .where(*_active_learning_word_filter())
-        .where(or_(models.SpellingReview.incorrect_count > 0, models.SpellingReview.current_stage == models.SpellingStage.trouble))
+        .where(
+            or_(
+                models.SpellingReview.forced_correction_required.is_(True),
+                models.SpellingWord.diagnostic_status == "missed",
+                models.SpellingReview.incorrect_count > 0,
+                models.SpellingReview.lapse_count > 0,
+                models.SpellingReview.current_stage == models.SpellingStage.trouble,
+            )
+        )
     ) or 0
     new_words = db.scalar(
         select(func.count(models.SpellingWord.id))
         .where(*_active_learning_word_filter())
         .where(or_(models.SpellingWord.introduced_at.is_(None), models.SpellingWord.mastery_state == "new"))
     ) or 0
-    diagnostic_tested = db.scalar(
-        select(func.count(func.distinct(models.SpellingAttempt.word_id))).where(models.SpellingAttempt.mode == models.SpellingMode.diagnostic)
-    ) or 0
     dictation_ready = db.scalar(
         select(func.count(models.SpellingWord.id))
         .where(*_active_learning_word_filter())
         .where(models.SpellingWord.introduced_at.is_not(None))
     ) or 0
-    if not diagnostic_tested:
-        recommended = models.SpellingSessionType.diagnostic.value
-    elif mistake_words:
-        recommended = models.SpellingSessionType.practice.value
-    elif due_reviews:
-        recommended = models.SpellingSessionType.review_due.value
-    elif new_words:
-        recommended = models.SpellingSessionType.exploration.value
-    else:
-        recommended = models.SpellingSessionType.dictation.value
+    diagnostic_ranked = _diagnostic_candidate_words(db, 10)
+    practice_ranked = _review_priority_words(db, 10, models.SpellingSessionType.practice)
+    review_due_ranked = _review_priority_words(db, 10, models.SpellingSessionType.review_due)
+    scheduled_review_ranked = [
+        item
+        for item in review_due_ranked
+        if item.score.reason in {"delayed audit", "due review"}
+    ]
+    exploration_words = _target_exploration_words(db)
+
+    def top_learning_value(items: List[RankedWord]) -> float:
+        top = items[:3]
+        return round(sum(item.score.total for item in top) / len(top), 4) if top else 0.0
+
+    diagnostic_coverage_pressure = min(len(diagnostic_ranked) / 5, 2.0)
+    mode_scores = {
+        models.SpellingSessionType.diagnostic.value: round(
+            top_learning_value(diagnostic_ranked) + diagnostic_coverage_pressure,
+            4,
+        ),
+        models.SpellingSessionType.practice.value: (
+            top_learning_value(practice_ranked) if mistake_words else 0.0
+        ),
+        models.SpellingSessionType.review_due.value: (
+            top_learning_value(scheduled_review_ranked) if due_reviews else 0.0
+        ),
+        models.SpellingSessionType.exploration.value: (
+            round(
+                max(
+                    (_word_usefulness_score(word) for word in exploration_words),
+                    default=0.0,
+                )
+                + 1.0,
+                4,
+            )
+            if exploration_words
+            else 0.0
+        ),
+        models.SpellingSessionType.dictation.value: (
+            round(top_learning_value(practice_ranked) * 0.8, 4)
+            if practice_ranked
+            else round(1.0 + min(dictation_ready, 10) * 0.05, 4)
+            if dictation_ready
+            else 0.0
+        ),
+    }
+    recommended = max(mode_scores, key=mode_scores.get)
+    recommended_reasons = {
+        models.SpellingSessionType.diagnostic.value: "Expand diagnostic coverage with high-value untested words.",
+        models.SpellingSessionType.practice.value: "Repair the highest-risk recent spelling mistakes.",
+        models.SpellingSessionType.review_due.value: "Complete the most valuable scheduled reviews.",
+        models.SpellingSessionType.exploration.value: "Introduce a useful new Oxford word.",
+        models.SpellingSessionType.dictation.value: "Strengthen recall through sentence dictation.",
+    }
     return schemas.SpellingDailyPlanOut(
         recommended_mode=recommended,
+        recommended_reason=recommended_reasons[recommended],
+        mode_scores=mode_scores,
         due_reviews=due_reviews,
         mistake_words=mistake_words,
         new_words=new_words,

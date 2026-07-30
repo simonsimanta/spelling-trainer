@@ -157,6 +157,8 @@ export type SessionItem = {
   prompt_text: string;
   source_reason?: string | null;
   queue_reason?: string | null;
+  selection_score: number;
+  score_breakdown: Record<string, number>;
   status: string;
   audio_ready: boolean;
   choices?: string[] | null;

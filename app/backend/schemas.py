@@ -175,6 +175,8 @@ class SpellingSessionItemOut(BaseModel):
     prompt_text: str
     source_reason: Optional[str] = None
     queue_reason: Optional[str] = None
+    selection_score: float = 0.0
+    score_breakdown: Dict[str, float] = Field(default_factory=dict)
     status: str = "pending"
     audio_ready: bool = False
     choices: Optional[List[str]] = None
@@ -363,6 +365,8 @@ class DashboardOut(BaseModel):
 
 class SpellingDailyPlanOut(BaseModel):
     recommended_mode: str
+    recommended_reason: str
+    mode_scores: Dict[str, float] = Field(default_factory=dict)
     due_reviews: int
     mistake_words: int
     new_words: int

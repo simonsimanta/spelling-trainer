@@ -230,6 +230,8 @@ export type BulkStatus = {
   generated: number;
   pending: number;
   failed: number;
+  voice?: string | null;
+  model?: string | null;
 };
 
 export type BulkPreview = BulkStatus & {
@@ -246,6 +248,8 @@ export type BulkGenerateResult = {
   cached: number;
   failed: number;
   remaining: number;
+  voice?: string | null;
+  model?: string | null;
 };
 
 export type OxfordLoadStatus = {

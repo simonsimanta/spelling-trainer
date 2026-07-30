@@ -1621,11 +1621,18 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
   const [results, setResults] = useState<Partial<Record<"content" | "audio", BulkGenerateResult>>>({});
   const [message, setMessage] = useState<string | null>(null);
 
-  async function load() {
-    setSettings(await getJson<Settings>("/settings"));
+  async function load(selectedSettings?: Settings) {
+    const activeSettings = selectedSettings ?? await getJson<Settings>("/settings");
+    if (!selectedSettings) {
+      setSettings(activeSettings);
+    }
     setOxfordStatus(await getJson<OxfordLoadStatus>("/spelling/oxford/load-status"));
     setContentStatus(await getJson<BulkStatus>("/spelling/content/bulk-status"));
-    setAudioStatus(await getJson<BulkStatus>("/spelling/audio/bulk-status"));
+    const audioParams = new URLSearchParams({
+      voice: activeSettings.tts_voice,
+      model: activeSettings.tts_model
+    });
+    setAudioStatus(await getJson<BulkStatus>(`/spelling/audio/bulk-status?${audioParams.toString()}`));
   }
 
   async function save(event: FormEvent) {
@@ -1633,6 +1640,7 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
     if (!settings) return;
     const updated = await patchJson<Settings>("/settings", settings);
     setSettings(updated);
+    await load(updated);
     await onRefresh();
     setMessage("Settings saved.");
   }
@@ -1663,7 +1671,7 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
         model: settings.tts_model
       });
       setResults((existing) => ({ ...existing, [kind]: result }));
-      await load();
+      await load(settings);
       setPreview(null);
       setMessage(`${kind === "content" ? "Word learning content" : "Word audio"} batch finished.`);
     } catch (err) {
@@ -1682,7 +1690,7 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
         limit: settings.content_bulk_limit
       });
       setOxfordResult(result);
-      await load();
+      await load(settings);
       await onRefresh();
       setMessage(`Oxford import finished: ${result.created} loaded, ${result.updated} already existed.`);
     } catch (err) {
@@ -1708,8 +1716,29 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
           </select>
         </label>
         <label>TTS Voice
-          <select value={settings.tts_voice} onChange={(event) => setSettings({ ...settings, tts_voice: event.target.value })}>
-            {["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"].map((voice) => (
+          <select
+            value={settings.tts_voice}
+            onChange={(event) => {
+              const updated = { ...settings, tts_voice: event.target.value };
+              setSettings(updated);
+              load(updated).catch(() => setAudioStatus(null));
+            }}
+          >
+            {[
+              "alloy",
+              "ash",
+              "ballad",
+              "cedar",
+              "coral",
+              "echo",
+              "fable",
+              "marin",
+              "nova",
+              "onyx",
+              "sage",
+              "shimmer",
+              "verse"
+            ].map((voice) => (
               <option value={voice} key={voice}>{title(voice)}</option>
             ))}
           </select>
@@ -1724,7 +1753,16 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
             <option value="disabled">Disabled</option>
           </select>
         </label>
-        <label className="advanced-field">TTS Model<input value={settings.tts_model} onChange={(event) => setSettings({ ...settings, tts_model: event.target.value })} /></label>
+        <label className="advanced-field">TTS Model
+          <input
+            value={settings.tts_model}
+            onBlur={() => load(settings).catch(() => setAudioStatus(null))}
+            onChange={(event) => {
+              setAudioStatus(null);
+              setSettings({ ...settings, tts_model: event.target.value });
+            }}
+          />
+        </label>
         <label className="advanced-field">AI Model<input value={settings.ai_model} onChange={(event) => setSettings({ ...settings, ai_model: event.target.value })} /></label>
         <button>Save Settings</button>
       </form>
@@ -1761,6 +1799,7 @@ function SettingsView({ onRefresh }: { onRefresh: () => Promise<void> }) {
           result={results.audio}
           running={running === "audio"}
           oxfordStatus={oxfordStatus}
+          variant={{ voice: settings.tts_voice, model: settings.tts_model }}
           onPreview={() => openPreview("audio")}
         />
       </div>
@@ -1832,6 +1871,7 @@ function BulkCard({
   result,
   running,
   oxfordStatus,
+  variant,
   onPreview
 }: {
   title: string;
@@ -1840,13 +1880,16 @@ function BulkCard({
   result?: BulkGenerateResult;
   running: boolean;
   oxfordStatus: OxfordLoadStatus | null;
+  variant?: { voice: string; model: string };
   onPreview: () => void;
 }) {
   const pending = status?.pending ?? 0;
   const loaded = oxfordStatus?.loaded_words ?? status?.total_words ?? 0;
   const target = oxfordStatus?.target_words ?? 5000;
   let buttonLabel = cardTitle.includes("Audio") ? "Preview Audio Batch" : "Preview Content Batch";
-  if (pending === 0) {
+  if (!status) {
+    buttonLabel = "Checking cache";
+  } else if (pending === 0) {
     buttonLabel = loaded < target ? "Load More Oxford Words First" : "All Loaded Words Cached";
   }
 
@@ -1854,6 +1897,13 @@ function BulkCard({
     <article className="bulk-card">
       <h3>{cardTitle}</h3>
       <p>{text}</p>
+      {variant ? (
+        <div className="audio-cache-variant">
+          <span><b>Voice</b>{title(variant.voice)}</span>
+          <span><b>Model</b>{variant.model}</span>
+          <span><b>Status</b>{status ? "Cache checked" : "Checking cache"}</span>
+        </div>
+      ) : null}
       <div className="bulk-status-row">
         <span><b>{status?.generated ?? 0} / {loaded}</b> generated / loaded</span>
         <span><b>{pending}</b> pending among loaded</span>
@@ -1864,7 +1914,7 @@ function BulkCard({
           Last run: {result.generated} generated, {result.cached} cached, {result.failed} failed, {result.remaining} remaining.
         </div>
       ) : null}
-      <button disabled={running || pending === 0} onClick={onPreview}>
+      <button disabled={running || !status || pending === 0} onClick={onPreview}>
         {running ? <Loader2 className="spin" size={16} /> : null}
         {running ? "Generating..." : buttonLabel}
       </button>

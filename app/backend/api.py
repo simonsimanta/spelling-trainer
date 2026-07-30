@@ -252,28 +252,61 @@ def get_spelling_costs(db: Session = Depends(get_db)) -> schemas.SpellingCostOve
 
 
 @app.get("/spelling/audio")
-def get_spelling_audio(text: str = Query(min_length=1, max_length=200)) -> Response:
-    return audio.get_audio_response(text)
+def get_spelling_audio(
+    text: str = Query(min_length=1, max_length=200),
+    voice: Optional[str] = Query(default=None, min_length=1, max_length=40),
+    model: Optional[str] = Query(default=None, min_length=1, max_length=80),
+    db: Session = Depends(get_db),
+) -> Response:
+    settings = repository.get_settings(db)
+    return audio.get_audio_response(
+        text,
+        voice=voice or settings.tts_voice,
+        model=model or settings.tts_model,
+    )
 
 
 @app.post("/spelling/audio/preload", response_model=schemas.SpellingAudioPreloadResponse)
-def preload_spelling_audio(payload: schemas.SpellingAudioPreloadRequest) -> schemas.SpellingAudioPreloadResponse:
-    return audio.preload_audio(payload)
+def preload_spelling_audio(
+    payload: schemas.SpellingAudioPreloadRequest,
+    db: Session = Depends(get_db),
+) -> schemas.SpellingAudioPreloadResponse:
+    settings = repository.get_settings(db)
+    return audio.preload_audio(
+        payload,
+        voice=payload.voice or settings.tts_voice,
+        model=payload.model or settings.tts_model,
+    )
 
 
 @app.get("/spelling/audio/bulk-status", response_model=schemas.SpellingAudioBulkStatus)
-def get_spelling_audio_bulk_status(db: Session = Depends(get_db)) -> schemas.SpellingAudioBulkStatus:
-    return audio.bulk_audio_status(db)
+def get_spelling_audio_bulk_status(
+    voice: Optional[str] = Query(default=None, min_length=1, max_length=40),
+    model: Optional[str] = Query(default=None, min_length=1, max_length=80),
+    db: Session = Depends(get_db),
+) -> schemas.SpellingAudioBulkStatus:
+    settings = repository.get_settings(db)
+    return audio.bulk_audio_status(
+        db,
+        voice=voice or settings.tts_voice,
+        model=model or settings.tts_model,
+    )
 
 
 @app.get("/spelling/audio/bulk-preview", response_model=schemas.BulkGeneratePreview)
 def get_spelling_audio_bulk_preview(
     limit: int = Query(default=100, ge=1, le=5000),
-    voice: str = Query(default="alloy", max_length=40),
-    model: str = Query(default="gpt-4o-mini-tts", max_length=80),
+    voice: Optional[str] = Query(default=None, min_length=1, max_length=40),
+    model: Optional[str] = Query(default=None, min_length=1, max_length=80),
     db: Session = Depends(get_db),
 ) -> schemas.BulkGeneratePreview:
-    return audio.bulk_audio_preview(db, limit=limit, voice=voice, model=model)
+    settings = repository.get_settings(db)
+    return audio.bulk_audio_preview(
+        db,
+        limit=limit,
+        voice=voice or settings.tts_voice,
+        model=model or settings.tts_model,
+    )
 
 
 @app.post("/spelling/audio/bulk-generate", response_model=schemas.SpellingAudioBulkGenerateResult)

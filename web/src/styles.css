@@ -1484,6 +1484,26 @@ p {
   color: #53627c;
 }
 
+.audio-cache-variant {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.7fr) minmax(150px, 1.5fr) minmax(110px, 1fr);
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid #e5edf6;
+  border-bottom: 1px solid #e5edf6;
+}
+
+.audio-cache-variant span {
+  min-width: 0;
+  color: #53627c;
+  overflow-wrap: anywhere;
+}
+
+.audio-cache-variant b {
+  display: block;
+  color: #102044;
+}
+
 .bulk-status-row {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1652,6 +1672,7 @@ p {
   .meaning-strip,
   .queue-reason,
   .exploration-pool-tabs,
+  .audio-cache-variant,
   .bulk-status-row,
   .preview-grid {
     grid-template-columns: 1fr;

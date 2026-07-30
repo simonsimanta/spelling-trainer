@@ -40,6 +40,7 @@ import type {
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof Home }> = [
   { key: "dashboard", label: "Dashboard", icon: Home },
+  { key: "diagnostic", label: "Diagnostic", icon: ListChecks },
   { key: "exploration", label: "Exploration", icon: Compass },
   { key: "practice", label: "Practice", icon: PenLine },
   { key: "dictation", label: "Dictation", icon: Mic },
@@ -49,7 +50,26 @@ const navItems: Array<{ key: ViewKey; label: string; icon: typeof Home }> = [
   { key: "settings", label: "Settings", icon: SettingsIcon }
 ];
 
-const modeCards: Array<{ view: ViewKey; title: string; text: string; cta: string; tone: string; icon: typeof Compass }> = [
+type ModeCard = { view: ViewKey; title: string; text: string; cta: string; tone: string; icon: typeof Compass };
+
+type ModeAvailability = {
+  countLabel: string;
+  detail: string;
+  actionLabel: string;
+  actionView: ViewKey;
+  ready: boolean;
+};
+
+type EmptyStateAction = {
+  title: string;
+  text: string;
+  primaryLabel: string;
+  primaryView: ViewKey;
+  secondaryLabel?: string;
+  secondaryView?: ViewKey;
+};
+
+const modeCards: ModeCard[] = [
   {
     view: "diagnostic",
     title: "Diagnostic",
@@ -96,6 +116,199 @@ function percent(value: number): string {
 
 function title(value: string): string {
   return value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function explorationReadyWords(stats: Dashboard["stats"]): number {
+  const oxfordRemaining = Math.max(stats.oxford_loaded_words - stats.oxford_explored_words, 0);
+  return oxfordRemaining + stats.llm_suggested_words;
+}
+
+function modeAvailability(card: ModeCard, dashboard: Dashboard | null): ModeAvailability {
+  if (!dashboard) {
+    return {
+      countLabel: "Checking",
+      detail: "Loading current availability.",
+      actionLabel: card.cta,
+      actionView: card.view,
+      ready: true
+    };
+  }
+
+  const stats = dashboard.stats;
+  const diagnosticReady = stats.diagnostic_ready_words;
+  const explorationReady = explorationReadyWords(stats);
+
+  if (card.view === "diagnostic") {
+    return {
+      countLabel: diagnosticReady ? `${diagnosticReady} ready` : "0 ready",
+      detail: diagnosticReady ? "Best first step for finding weak spellings." : "All current diagnostic words have been tested.",
+      actionLabel: diagnosticReady ? "Start Diagnostic" : stats.oxford_loaded_words ? "Explore Words" : "Load Words",
+      actionView: diagnosticReady ? "diagnostic" : stats.oxford_loaded_words ? "exploration" : "settings",
+      ready: diagnosticReady > 0
+    };
+  }
+
+  if (card.view === "exploration") {
+    if (!stats.oxford_loaded_words && !stats.llm_suggested_words) {
+      return {
+        countLabel: "Setup needed",
+        detail: "Load Oxford words before exploring the core list.",
+        actionLabel: "Load Words",
+        actionView: "settings",
+        ready: false
+      };
+    }
+    return {
+      countLabel: explorationReady ? `${explorationReady} new` : "0 new",
+      detail: explorationReady ? "New Oxford or suggested words are available." : "All loaded exploration words are complete.",
+      actionLabel: explorationReady ? "Explore" : "Load More",
+      actionView: explorationReady ? "exploration" : "settings",
+      ready: explorationReady > 0
+    };
+  }
+
+  if (card.view === "practice") {
+    if (stats.practice_queue_words) {
+      return {
+        countLabel: `${stats.practice_queue_words} queued`,
+        detail: "Missed or due words are ready for repair.",
+        actionLabel: "Practice",
+        actionView: "practice",
+        ready: true
+      };
+    }
+    return {
+      countLabel: "0 queued",
+      detail: diagnosticReady ? "Run Diagnostic first to build your practice queue." : "No missed spellings are waiting.",
+      actionLabel: diagnosticReady ? "Start Diagnostic" : explorationReady ? "Explore Words" : "Load Words",
+      actionView: diagnosticReady ? "diagnostic" : explorationReady ? "exploration" : "settings",
+      ready: false
+    };
+  }
+
+  if (card.view === "dictation") {
+    if (stats.dictation_ready_words) {
+      return {
+        countLabel: `${stats.dictation_ready_words} ready`,
+        detail: "Trouble words are ready for sentence dictation.",
+        actionLabel: "Start Dictation",
+        actionView: "dictation",
+        ready: true
+      };
+    }
+    return {
+      countLabel: "0 ready",
+      detail: diagnosticReady ? "Run Diagnostic first; misses will unlock Dictation." : "No trouble words are ready for sentences.",
+      actionLabel: diagnosticReady ? "Start Diagnostic" : explorationReady ? "Explore Words" : "Load Words",
+      actionView: diagnosticReady ? "diagnostic" : explorationReady ? "exploration" : "settings",
+      ready: false
+    };
+  }
+
+  return {
+    countLabel: "Ready",
+    detail: card.text,
+    actionLabel: card.cta,
+    actionView: card.view,
+    ready: true
+  };
+}
+
+function practiceEmptyState(mode: "diagnostic" | "practice" | "dictation", dashboard: Dashboard | null): EmptyStateAction {
+  const stats = dashboard?.stats;
+  const diagnosticReady = stats?.diagnostic_ready_words ?? 0;
+  const explorationReady = stats ? explorationReadyWords(stats) : 0;
+  const hasOxfordWords = Boolean(stats?.oxford_loaded_words);
+  const isDictation = mode === "dictation";
+
+  if (mode === "diagnostic") {
+    if (!hasOxfordWords) {
+      return {
+        title: "No diagnostic words left",
+        text: "The starter diagnostic words are complete. Load Oxford words to expand the diagnostic pool.",
+        primaryLabel: "Load Oxford Words",
+        primaryView: "settings"
+      };
+    }
+    return {
+      title: "No diagnostic words left",
+      text: "All available diagnostic words have already been tested. Explore loaded words or add suggested words to expand the pool.",
+      primaryLabel: explorationReady ? "Go to Exploration" : "Go to Settings",
+      primaryView: explorationReady ? "exploration" : "settings"
+    };
+  }
+
+  if (diagnosticReady > 0) {
+    return {
+      title: isDictation ? "No dictation words yet" : "No practice words yet",
+      text: `${diagnosticReady} diagnostic words are ready. Run Diagnostic first so missed spellings can enter ${isDictation ? "Dictation" : "Practice"}.`,
+      primaryLabel: "Start Diagnostic",
+      primaryView: "diagnostic",
+      secondaryLabel: hasOxfordWords ? undefined : "Load Oxford Words",
+      secondaryView: hasOxfordWords ? undefined : "settings"
+    };
+  }
+
+  if (!hasOxfordWords) {
+    return {
+      title: isDictation ? "No dictation words yet" : "No practice words yet",
+      text: "No Oxford words are loaded yet. Load the core list in Settings to create more learning paths.",
+      primaryLabel: "Load Oxford Words",
+      primaryView: "settings"
+    };
+  }
+
+  if (explorationReady > 0) {
+    return {
+      title: isDictation ? "No dictation words yet" : "No practice words yet",
+      text: `Explore new words first. Misses will enter ${isDictation ? "Dictation" : "Practice"} when they need repair.`,
+      primaryLabel: "Go to Exploration",
+      primaryView: "exploration"
+    };
+  }
+
+  return {
+    title: isDictation ? "No dictation words yet" : "No practice words yet",
+    text: "There are no missed or due words waiting right now.",
+    primaryLabel: "Go to Settings",
+    primaryView: "settings"
+  };
+}
+
+function explorationEmptyState(pool: ExplorationPool, dashboard: Dashboard | null, fallback?: string | null): EmptyStateAction | null {
+  const stats = dashboard?.stats;
+  const diagnosticReady = stats?.diagnostic_ready_words ?? 0;
+
+  if (pool === "oxford" && stats && !stats.oxford_loaded_words) {
+    return {
+      title: "Exploration pool is empty",
+      text: "Oxford words are not loaded yet. Load the core list in Settings, or run Diagnostic with the starter words.",
+      primaryLabel: "Load Oxford Words",
+      primaryView: "settings",
+      secondaryLabel: diagnosticReady ? "Start Diagnostic" : undefined,
+      secondaryView: diagnosticReady ? "diagnostic" : undefined
+    };
+  }
+
+  if (pool === "suggested" && !(stats?.llm_suggested_words ?? 0)) {
+    return {
+      title: "Exploration pool is empty",
+      text: "No AI difficult words are ready yet. Practice misses will create suggestions over time.",
+      primaryLabel: diagnosticReady ? "Start Diagnostic" : "Go to Settings",
+      primaryView: diagnosticReady ? "diagnostic" : "settings"
+    };
+  }
+
+  if (fallback) {
+    return {
+      title: "Exploration pool is empty",
+      text: fallback,
+      primaryLabel: diagnosticReady ? "Start Diagnostic" : "Go to Settings",
+      primaryView: diagnosticReady ? "diagnostic" : "settings"
+    };
+  }
+
+  return null;
 }
 
 export default function App() {
@@ -157,7 +370,7 @@ export default function App() {
           <>
             {view === "dashboard" && <DashboardView dashboard={dashboard} setView={setView} />}
             {view === "diagnostic" && <PracticeView mode="diagnostic" dashboard={dashboard} onRefresh={refreshDashboard} onNavigate={setView} />}
-            {view === "exploration" && <ExplorationView dashboard={dashboard} onRefresh={refreshDashboard} />}
+            {view === "exploration" && <ExplorationView dashboard={dashboard} onRefresh={refreshDashboard} onNavigate={setView} />}
             {view === "practice" && <PracticeView mode="practice" dashboard={dashboard} onRefresh={refreshDashboard} onNavigate={setView} />}
             {view === "dictation" && <PracticeView mode="dictation" dashboard={dashboard} onRefresh={refreshDashboard} onNavigate={setView} />}
             {view === "wordLists" && <WordListsView />}
@@ -316,13 +529,18 @@ function DashboardView({ dashboard, setView }: { dashboard: Dashboard | null; se
         <div className="mode-grid">
           {modeCards.map((card) => {
             const Icon = card.icon;
+            const availability = modeAvailability(card, dashboard);
             return (
               <article className={`mode-card ${card.tone}`} key={card.view}>
                 <Icon size={38} />
                 <h3>{card.title}</h3>
                 <p>{card.text}</p>
-                <button onClick={() => setView(card.view)}>
-                  {card.cta} <ChevronRight size={16} />
+                <div className={availability.ready ? "mode-status ready" : "mode-status"}>
+                  <strong>{availability.countLabel}</strong>
+                  <span>{availability.detail}</span>
+                </div>
+                <button onClick={() => setView(availability.actionView)}>
+                  {availability.actionLabel} <ChevronRight size={16} />
                 </button>
               </article>
             );
@@ -435,7 +653,15 @@ const explorationPools: Array<{ key: ExplorationPool; label: string; description
   { key: "mixed", label: "Mixed", description: "Blend suggested words with Oxford words." }
 ];
 
-function ExplorationView({ dashboard, onRefresh }: { dashboard: Dashboard | null; onRefresh: () => Promise<void> }) {
+function ExplorationView({
+  dashboard,
+  onRefresh,
+  onNavigate
+}: {
+  dashboard: Dashboard | null;
+  onRefresh: () => Promise<void>;
+  onNavigate: (view: ViewKey) => void;
+}) {
   const [data, setData] = useState<Exploration | null>(null);
   const [loading, setLoading] = useState(false);
   const [audioError, setAudioError] = useState<string | null>(null);
@@ -506,11 +732,12 @@ function ExplorationView({ dashboard, onRefresh }: { dashboard: Dashboard | null
   }, [pool]);
 
   if (!data) {
+    const emptyState = explorationEmptyState(pool, dashboard, emptyMessage);
     return (
       <section className="workbench centered">
         {loading ? <Loader2 className="spin" size={48} /> : <Compass size={54} />}
-        <h1>{loading ? "Loading exploration" : "Exploration pool is empty"}</h1>
-        <p>{emptyMessage || "Choose a pool to continue exploring words."}</p>
+        <h1>{loading ? "Loading exploration" : emptyState?.title ?? "Exploration pool is empty"}</h1>
+        <p>{emptyState?.text || "Choose a pool to continue exploring words."}</p>
         <div className="exploration-pool-tabs">
           {explorationPools.map((item) => (
             <button
@@ -522,6 +749,16 @@ function ExplorationView({ dashboard, onRefresh }: { dashboard: Dashboard | null
             </button>
           ))}
         </div>
+        {!loading && emptyState ? (
+          <div className="center-actions">
+            <button onClick={() => onNavigate(emptyState.primaryView)}>{emptyState.primaryLabel}</button>
+            {emptyState.secondaryView ? (
+              <button className="secondary" onClick={() => onNavigate(emptyState.secondaryView as ViewKey)}>
+                {emptyState.secondaryLabel}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </section>
     );
   }
@@ -827,17 +1064,19 @@ function PracticeView({
   }
 
   if (session.items.length === 0) {
+    const emptyState = practiceEmptyState(mode, dashboard);
     return (
       <section className="workbench centered">
         <Volume2 size={54} />
-        <h1>{isDictation ? "No dictation words yet" : isDiagnostic ? "No diagnostic words left" : "No practice words yet"}</h1>
-        <p>
-          {isDiagnostic
-            ? "All available diagnostic words have already been tested. Load more Oxford words or add suggested words to expand the diagnostic pool."
-            : "Words enter this queue after you miss them in Exploration or review. Explore new words first, then missed spellings will appear here."}
-        </p>
+        <h1>{emptyState.title}</h1>
+        <p>{emptyState.text}</p>
         <div className="center-actions">
-          <button onClick={() => onNavigate(isDiagnostic ? "settings" : "exploration")}>{isDiagnostic ? "Go to Settings" : "Go to Exploration"}</button>
+          <button onClick={() => onNavigate(emptyState.primaryView)}>{emptyState.primaryLabel}</button>
+          {emptyState.secondaryView ? (
+            <button className="secondary" onClick={() => onNavigate(emptyState.secondaryView as ViewKey)}>
+              {emptyState.secondaryLabel}
+            </button>
+          ) : null}
           <button className="secondary" onClick={() => setSession(null)}>Back</button>
         </div>
       </section>

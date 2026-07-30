@@ -325,6 +325,7 @@ class DashboardStats(BaseModel):
     forced_correction_words: int
     practice_queue_words: int
     dictation_ready_words: int
+    diagnostic_ready_words: int
     diagnostic_tested_words: int
     diagnostic_missed_words: int
     diagnostic_accuracy: float

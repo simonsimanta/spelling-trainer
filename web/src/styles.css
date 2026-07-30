@@ -428,6 +428,34 @@ p {
   color: #53627c;
 }
 
+.mode-status {
+  width: 100%;
+  min-height: 76px;
+  border: 1px solid #d9e2ef;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+  display: grid;
+  gap: 3px;
+  align-content: center;
+  text-align: left;
+}
+
+.mode-status.ready {
+  border-color: #b7e5cd;
+  background: #fbfffd;
+}
+
+.mode-status strong {
+  color: #102044;
+}
+
+.mode-status span {
+  color: #53627c;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
 .mode-card.green button,
 .round-icon.green {
   background: #0ba66c;

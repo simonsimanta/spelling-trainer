@@ -2200,6 +2200,17 @@ def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
     diagnostic_tested_words = db.scalar(
         select(func.count(func.distinct(models.SpellingAttempt.word_id))).where(models.SpellingAttempt.mode == models.SpellingMode.diagnostic)
     ) or 0
+    diagnostic_attempted_ids = (
+        select(models.SpellingAttempt.word_id)
+        .where(models.SpellingAttempt.mode == models.SpellingMode.diagnostic)
+        .distinct()
+    )
+    diagnostic_ready_words = db.scalar(
+        select(func.count(models.SpellingWord.id))
+        .where(models.SpellingWord.is_active.is_(True))
+        .where(models.SpellingWord.known_skipped.is_(False))
+        .where(models.SpellingWord.id.not_in(diagnostic_attempted_ids))
+    ) or 0
     diagnostic_missed_words = db.scalar(
         select(func.count(models.SpellingWord.id)).where(models.SpellingWord.diagnostic_status == "missed")
     ) or 0
@@ -2281,6 +2292,7 @@ def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
         forced_correction_words=forced_correction_words,
         practice_queue_words=practice_queue_words,
         dictation_ready_words=dictation_ready_words,
+        diagnostic_ready_words=diagnostic_ready_words,
         diagnostic_tested_words=diagnostic_tested_words,
         diagnostic_missed_words=diagnostic_missed_words,
         diagnostic_accuracy=_accuracy_for_modes(db, [models.SpellingMode.diagnostic]),

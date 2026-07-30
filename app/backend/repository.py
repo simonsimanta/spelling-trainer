@@ -76,6 +76,13 @@ class RankedWord:
     score: SelectionScore
 
 
+@dataclass(frozen=True)
+class DictationAssessment:
+    target_spelling_correct: bool
+    sentence_complete: bool
+    sentence_similarity: float
+
+
 CONFUSION_GROUPS = [
     ["definitely", "separate", "necessary", "embarrass", "accommodate", "occasionally"],
     ["receive", "believe", "piece", "friend"],
@@ -439,8 +446,16 @@ def _build_diff_json(correct_word: str, attempt_text: str) -> Dict[str, Any]:
 def _word_tokens(value: str) -> List[str]:
     tokens: List[str] = []
     current: List[str] = []
-    for char in value.lower():
+    normalized = value.lower().replace("\u2019", "'").replace("\u2010", "-").replace("\u2011", "-")
+    for index, char in enumerate(normalized):
         if char.isalpha():
+            current.append(char)
+        elif (
+            char in {"'", "-"}
+            and current
+            and index + 1 < len(normalized)
+            and normalized[index + 1].isalpha()
+        ):
             current.append(char)
         elif current:
             tokens.append("".join(current))
@@ -451,7 +466,26 @@ def _word_tokens(value: str) -> List[str]:
 
 
 def _dictation_target_correct(target_word: str, attempt_text: str) -> bool:
-    return _normalize_text(target_word) in _word_tokens(attempt_text)
+    target_tokens = _word_tokens(target_word)
+    attempt_tokens = _word_tokens(attempt_text)
+    if not target_tokens:
+        return False
+    width = len(target_tokens)
+    return any(
+        attempt_tokens[index : index + width] == target_tokens
+        for index in range(len(attempt_tokens) - width + 1)
+    )
+
+
+def _assess_dictation(expected_text: str, attempt_text: str, target_word: str) -> DictationAssessment:
+    expected_tokens = _word_tokens(expected_text)
+    attempt_tokens = _word_tokens(attempt_text)
+    similarity = SequenceMatcher(None, expected_tokens, attempt_tokens).ratio() if expected_tokens else 0.0
+    return DictationAssessment(
+        target_spelling_correct=_dictation_target_correct(target_word, attempt_text),
+        sentence_complete=bool(expected_tokens) and expected_tokens == attempt_tokens,
+        sentence_similarity=round(similarity, 4),
+    )
 
 
 def _closest_target_attempt(target_word: str, attempt_text: str) -> str:
@@ -462,9 +496,15 @@ def _closest_target_attempt(target_word: str, attempt_text: str) -> str:
     return max(tokens, key=lambda token: SequenceMatcher(None, target, token).ratio())
 
 
-def _build_sentence_diff_json(expected_text: str, attempt_text: str, target_word: str) -> Dict[str, Any]:
+def _build_sentence_diff_json(
+    expected_text: str,
+    attempt_text: str,
+    target_word: str,
+    assessment: Optional[DictationAssessment] = None,
+) -> Dict[str, Any]:
     expected = _word_tokens(expected_text)
     attempt = _word_tokens(attempt_text)
+    result = assessment or _assess_dictation(expected_text, attempt_text, target_word)
     matcher = SequenceMatcher(None, expected, attempt)
     operations: List[Dict[str, Any]] = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -483,7 +523,10 @@ def _build_sentence_diff_json(expected_text: str, attempt_text: str, target_word
         "expected": expected_text,
         "attempt": attempt_text,
         "target_word": target_word,
-        "target_correct": _dictation_target_correct(target_word, attempt_text),
+        "target_correct": result.target_spelling_correct,
+        "target_spelling_correct": result.target_spelling_correct,
+        "sentence_complete": result.sentence_complete,
+        "sentence_similarity": result.sentence_similarity,
         "operations": operations,
     }
 
@@ -1695,8 +1738,17 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
     review = _ensure_spelling_review(db, word)
     session_item = db.get(models.SpellingSessionItem, payload.session_item_id) if payload.session_item_id else None
 
+    dictation_assessment: Optional[DictationAssessment] = None
     if payload.mode == models.SpellingMode.dictation.value:
-        correct = _dictation_target_correct(word.term, payload.attempt_text)
+        expected_text = (
+            session_item.prompt_text
+            if session_item
+            else word.example_sentence or _example_sentence(word.term)
+        )
+        dictation_assessment = _assess_dictation(expected_text, payload.attempt_text, word.term)
+        # Dictation advances spelling mastery from the target spelling only.
+        # Sentence completeness is a separate feedback signal.
+        correct = dictation_assessment.target_spelling_correct
     else:
         correct = _normalize_text(payload.attempt_text) == _normalize_text(word.term)
     if payload.mode == models.SpellingMode.dictation.value:
@@ -1718,8 +1770,13 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
     diff_json = None
     sentence_diff_json = None
     now = datetime.utcnow()
-    if payload.mode == models.SpellingMode.dictation.value and session_item:
-        sentence_diff_json = _build_sentence_diff_json(session_item.prompt_text, payload.attempt_text, word.term)
+    if dictation_assessment is not None:
+        sentence_diff_json = _build_sentence_diff_json(
+            expected_text,
+            payload.attempt_text,
+            word.term,
+            dictation_assessment,
+        )
 
     word.known_skipped = False
     word.introduced_at = word.introduced_at or now
@@ -1909,6 +1966,13 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
         example_sentence=word.example_sentence or _example_sentence(word.term),
         diff_json=diff_json,
         sentence_diff_json=sentence_diff_json,
+        target_spelling_correct=(
+            dictation_assessment.target_spelling_correct if dictation_assessment is not None else None
+        ),
+        sentence_complete=dictation_assessment.sentence_complete if dictation_assessment is not None else None,
+        sentence_similarity=(
+            dictation_assessment.sentence_similarity if dictation_assessment is not None else None
+        ),
         chunk_feedback=word.chunked_form or _chunk_hint(word.term),
         phonetic_feedback=_phonetic_feedback(word),
         forced_correction_required=review.forced_correction_required,

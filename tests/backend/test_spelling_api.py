@@ -945,8 +945,12 @@ def test_dictation_grades_target_word_and_returns_sentence_diff() -> None:
     assert target_wrong.status_code == 200
     wrong_payload = target_wrong.json()
     assert wrong_payload["is_correct"] is False
+    assert wrong_payload["target_spelling_correct"] is False
+    assert wrong_payload["sentence_complete"] is False
+    assert wrong_payload["sentence_similarity"] < 1.0
     assert wrong_payload["forced_correction_required"] is True
     assert wrong_payload["sentence_diff_json"]["target_correct"] is False
+    assert wrong_payload["sentence_diff_json"]["target_spelling_correct"] is False
 
     correction = client.post(
         f"/spelling/attempts/{wrong_payload['attempt_id']}/correct",
@@ -955,19 +959,109 @@ def test_dictation_grades_target_word_and_returns_sentence_diff() -> None:
     assert correction.status_code == 200
     assert correction.json()["allow_next"] is True
 
-    target_correct = client.post(
+    partial_sentence = client.post(
         "/spelling/attempts",
         json={
             "session_id": session["session_id"],
             "session_item_id": item["session_item_id"],
             "word_id": item["word_id"],
-            "attempt_text": item["prompt_text"],
+            "attempt_text": item["term"],
             "mode": "dictation",
         },
     )
-    assert target_correct.status_code == 200
-    assert target_correct.json()["is_correct"] is True
-    assert target_correct.json()["sentence_diff_json"]["target_correct"] is True
+    assert partial_sentence.status_code == 200
+    partial_payload = partial_sentence.json()
+    assert partial_payload["is_correct"] is True
+    assert partial_payload["target_spelling_correct"] is True
+    assert partial_payload["sentence_complete"] is False
+    assert partial_payload["sentence_similarity"] < 1.0
+    assert partial_payload["allow_next"] is True
+    assert partial_payload["forced_correction_required"] is False
+
+    full_sentence = client.post(
+        "/spelling/attempts",
+        json={
+            "session_id": session["session_id"],
+            "session_item_id": item["session_item_id"],
+            "word_id": item["word_id"],
+            "attempt_text": item["prompt_text"].upper().rstrip("."),
+            "mode": "dictation",
+        },
+    )
+    assert full_sentence.status_code == 200
+    full_payload = full_sentence.json()
+    assert full_payload["is_correct"] is True
+    assert full_payload["target_spelling_correct"] is True
+    assert full_payload["sentence_complete"] is True
+    assert full_payload["sentence_similarity"] == 1.0
+    assert full_payload["sentence_diff_json"]["operations"] == []
+
+
+def test_dictation_assessment_handles_sentence_and_compound_word_cases() -> None:
+    cases = [
+        (
+            "I definitely finished the task.",
+            "I definitely finished the task",
+            "definitely",
+            True,
+            True,
+        ),
+        (
+            "I definitely finished the task.",
+            "Definitely finished",
+            "definitely",
+            True,
+            False,
+        ),
+        (
+            "I definitely finished the task.",
+            "I definitely finished the task very quickly.",
+            "definitely",
+            True,
+            False,
+        ),
+        (
+            "I definitely finished the task.",
+            "This is definitely the wrong sentence.",
+            "definitely",
+            True,
+            False,
+        ),
+        (
+            "I can't attend today.",
+            "I can't attend today",
+            "can't",
+            True,
+            True,
+        ),
+        (
+            "I can't attend today.",
+            "I cant attend today",
+            "can't",
+            False,
+            False,
+        ),
+        (
+            "It is a well-known fact.",
+            "It is a well-known fact",
+            "well-known",
+            True,
+            True,
+        ),
+        (
+            "It is a well-known fact.",
+            "It is a well known fact",
+            "well-known",
+            False,
+            False,
+        ),
+    ]
+
+    for expected, attempt, target, target_correct, sentence_complete in cases:
+        result = repository._assess_dictation(expected, attempt, target)
+        assert result.target_spelling_correct is target_correct
+        assert result.sentence_complete is sentence_complete
+        assert 0.0 <= result.sentence_similarity <= 1.0
 
 
 def test_content_and_audio_bulk_generation(monkeypatch, tmp_path) -> None:

@@ -1435,11 +1435,51 @@ function PracticeProgressPanel({
 
 function Feedback({ result }: { result: AttemptResult }) {
   const feedbackText = result.llm_feedback?.replace(/\*\*/g, "");
+  const isDictation = result.target_spelling_correct != null || result.sentence_diff_json != null;
+  const targetSpellingCorrect =
+    result.target_spelling_correct ??
+    result.sentence_diff_json?.target_spelling_correct ??
+    result.sentence_diff_json?.target_correct ??
+    result.is_correct;
+  const sentenceComplete =
+    result.sentence_complete ??
+    result.sentence_diff_json?.sentence_complete ??
+    false;
+  const sentenceSimilarity =
+    result.sentence_similarity ??
+    result.sentence_diff_json?.sentence_similarity ??
+    0;
+  const resultCorrect = isDictation ? targetSpellingCorrect : result.is_correct;
+  let headline = result.is_correct ? `Correct. +${result.points_awarded} points` : "Not correct yet.";
+  if (isDictation) {
+    headline = targetSpellingCorrect
+      ? `Target spelling correct. +${result.points_awarded} points`
+      : "Target spelling needs work.";
+  }
+
   return (
-    <div className={result.is_correct ? "feedback correct" : "feedback wrong"}>
-      <strong>{result.is_correct ? `Correct. +${result.points_awarded} points` : "Not correct yet."}</strong>
+    <div className={resultCorrect ? "feedback correct" : "feedback wrong"}>
+      <strong>{headline}</strong>
+      {isDictation ? (
+        <div className="dictation-outcomes" aria-label="Dictation results">
+          <span className={targetSpellingCorrect ? "outcome-pass" : "outcome-review"}>
+            <b>Target spelling</b>
+            <strong>
+              {targetSpellingCorrect ? <CheckCircle2 size={17} /> : <XCircle size={17} />}
+              {targetSpellingCorrect ? "Correct" : "Needs practice"}
+            </strong>
+          </span>
+          <span className={sentenceComplete ? "outcome-pass" : "outcome-review"}>
+            <b>Sentence completeness</b>
+            <strong>
+              {sentenceComplete ? <CheckCircle2 size={17} /> : <XCircle size={17} />}
+              {sentenceComplete ? "Complete" : `${Math.round(sentenceSimilarity * 100)}% match`}
+            </strong>
+          </span>
+        </div>
+      ) : null}
       {feedbackText ? <p>{feedbackText}</p> : null}
-      {!result.is_correct && result.diff_json?.operations?.length ? (
+      {!resultCorrect && result.diff_json?.operations?.length ? (
         <div className="diff-row">
           {result.diff_json.operations.map((operation, index) => (
             <span key={index}>{String(operation.type)} {String(operation.expected ?? operation.actual ?? "")}</span>

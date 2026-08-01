@@ -6,6 +6,7 @@ import {
   Award,
   BarChart3,
   BookOpen,
+  CalendarCheck2,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -23,6 +24,8 @@ import {
   Search,
   Settings as SettingsIcon,
   Sparkles,
+  Target,
+  TrendingUp,
   Trophy,
   Volume2,
   X,
@@ -326,6 +329,48 @@ function explorationEmptyState(pool: ExplorationPool, dashboard: Dashboard | nul
   return null;
 }
 
+type NextBestAction = {
+  view: ViewKey;
+  title: string;
+  reason: string;
+  actionLabel: string;
+};
+
+function nextBestAction(dashboard: Dashboard, readiness: ReadinessReport | null): NextBestAction {
+  const requiredFailure = readiness?.checks.find((check) => check.required && check.status === "failed");
+  if (requiredFailure) {
+    return {
+      view: "settings",
+      title: `Restore ${requiredFailure.label.toLowerCase()}`,
+      reason: requiredFailure.action ?? requiredFailure.detail,
+      actionLabel: "Open Settings"
+    };
+  }
+
+  const mode = dashboard.daily_plan.recommended_mode;
+  if (mode === "exploration" && dashboard.stats.oxford_loaded_words === 0) {
+    return {
+      view: "settings",
+      title: "Load your Oxford word library",
+      reason: "Exploration needs source words. Load the first Oxford batch, then return to begin learning.",
+      actionLabel: "Set Up Words"
+    };
+  }
+
+  const actions: Record<string, Omit<NextBestAction, "reason">> = {
+    diagnostic: { view: "diagnostic", title: "Run your diagnostic baseline", actionLabel: "Start Diagnostic" },
+    practice: { view: "practice", title: "Repair your highest-risk spellings", actionLabel: "Start Practice" },
+    review_due: { view: "practice", title: "Complete your scheduled reviews", actionLabel: "Review Now" },
+    exploration: { view: "exploration", title: "Introduce a useful new word", actionLabel: "Explore Word" },
+    dictation: { view: "dictation", title: "Strengthen recall through dictation", actionLabel: "Start Dictation" }
+  };
+  const action = actions[mode] ?? actions.diagnostic;
+  return {
+    ...action,
+    reason: dashboard.daily_plan.recommended_reason
+  };
+}
+
 export default function App() {
   const [view, setView] = useState<ViewKey>("dashboard");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
@@ -444,7 +489,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {view === "dashboard" && <DashboardView dashboard={dashboard} setView={setView} />}
+            {view === "dashboard" && <DashboardView dashboard={dashboard} readiness={readiness} setView={setView} />}
             {view === "diagnostic" && <PracticeView mode="diagnostic" dashboard={dashboard} onRefresh={refreshDashboard} onNavigate={setView} />}
             {view === "exploration" && <ExplorationView dashboard={dashboard} onRefresh={refreshDashboard} onNavigate={setView} />}
             {view === "practice" && (
@@ -464,8 +509,8 @@ export default function App() {
                 onRefresh={refreshDashboard}
               />
             )}
-            {view === "progress" && <ProgressView dashboard={dashboard} />}
-            {view === "achievements" && <AchievementsView />}
+            {view === "progress" && <ProgressView dashboard={dashboard} onNavigate={setView} />}
+            {view === "achievements" && <AchievementsView onNavigate={setView} />}
             {view === "settings" && (
               <SettingsView
                 readiness={readiness}
@@ -480,9 +525,23 @@ export default function App() {
   );
 }
 
-function DashboardView({ dashboard, setView }: { dashboard: Dashboard | null; setView: (view: ViewKey) => void }) {
+function DashboardView({
+  dashboard,
+  readiness,
+  setView
+}: {
+  dashboard: Dashboard | null;
+  readiness: ReadinessReport | null;
+  setView: (view: ViewKey) => void;
+}) {
   if (!dashboard) return null;
   const stats = dashboard.stats;
+  const nextAction = nextBestAction(dashboard, readiness);
+  const hasLearningHistory = stats.first_try_accuracy > 0
+    || stats.diagnostic_tested_words > 0
+    || stats.practice_distinct_words > 0
+    || stats.dictation_distinct_words > 0
+    || stats.oxford_explored_words > 0;
   const oxfordLoadedPercent = stats.oxford_target_words ? stats.oxford_loaded_words / stats.oxford_target_words : 0;
   const oxfordExploredPercent = stats.oxford_loaded_words ? stats.oxford_explored_words / stats.oxford_loaded_words : 0;
   const contentPercent = stats.oxford_loaded_words ? stats.content_generated_words / stats.oxford_loaded_words : 0;
@@ -517,9 +576,32 @@ function DashboardView({ dashboard, setView }: { dashboard: Dashboard | null; se
         </div>
       </div>
 
+      <section className="next-action-band span-2" aria-labelledby="next-action-title">
+        <div className="next-action-icon"><Target size={26} /></div>
+        <div className="next-action-copy">
+          <div className="next-action-label">
+            <span>Next best action</span>
+            <strong>Daily plan</strong>
+          </div>
+          <h2 id="next-action-title">{nextAction.title}</h2>
+          <p>{nextAction.reason}</p>
+          <div className="next-action-signals">
+            <span>{dashboard.daily_plan.due_reviews} reviews due</span>
+            <span>{dashboard.daily_plan.mistake_words} mistake words</span>
+            <span>{dashboard.daily_plan.new_words} new words</span>
+          </div>
+        </div>
+        <button onClick={() => setView(nextAction.view)}>
+          {nextAction.actionLabel} <ChevronRight size={17} />
+        </button>
+      </section>
+
       <div className="panel span-2 analytics-panel outcome-panel">
         <div className="section-head">
-          <h2>Learning Outcomes</h2>
+          <div>
+            <span className="metric-kind outcome">Learning outcome</span>
+            <h2>Learning Outcomes</h2>
+          </div>
           <button className="ghost" onClick={() => setView("progress")}>
             View Progress <ChevronRight size={16} />
           </button>
@@ -541,8 +623,11 @@ function DashboardView({ dashboard, setView }: { dashboard: Dashboard | null; se
 
       <div className="panel span-2 analytics-panel">
         <div className="section-head">
-          <h2>Coverage And Cache Health</h2>
-          <span className="muted">Setup status, not learning success</span>
+          <div>
+            <span className="metric-kind setup">Setup health</span>
+            <h2>Coverage And Cache Health</h2>
+          </div>
+          <span className="muted">Availability metrics, not learning success</span>
         </div>
         <div className="analytics-grid">
           <Metric icon={BookOpen} label="Oxford Loaded" value={`${stats.oxford_loaded_words} / ${stats.oxford_target_words}`} sub={`${percent(oxfordLoadedPercent)} setup coverage`} />
@@ -583,6 +668,7 @@ function DashboardView({ dashboard, setView }: { dashboard: Dashboard | null; se
       </div>
 
       <div className="panel">
+        <span className="metric-kind queue">Queue health</span>
         <h2>Queue Health</h2>
         <MiniBars
           rows={[
@@ -651,7 +737,25 @@ function DashboardView({ dashboard, setView }: { dashboard: Dashboard | null; se
             View All <ChevronRight size={16} />
           </button>
         </div>
-        <ActivityList rows={dashboard.recent_activity} />
+        {dashboard.recent_activity.length ? (
+          <ActivityList rows={dashboard.recent_activity} />
+        ) : hasLearningHistory ? (
+          <GuidedEmptyState
+            icon={CalendarCheck2}
+            title="No recent sessions"
+            text="Return to your Daily Plan to keep reviews current and rebuild a consistent learning rhythm."
+            actionLabel={nextAction.actionLabel}
+            onAction={() => setView(nextAction.view)}
+          />
+        ) : (
+          <GuidedEmptyState
+            icon={ListChecks}
+            title="Your learning history starts with a diagnostic"
+            text="Test a short set of words so the trainer can identify misses and build your first practice queue."
+            actionLabel="Start Diagnostic"
+            onAction={() => setView("diagnostic")}
+          />
+        )}
       </div>
     </section>
   );
@@ -738,6 +842,31 @@ function Metric({ icon: Icon, label, value, sub }: { icon: typeof BookOpen; labe
         <small>{sub}</small>
       </div>
     </article>
+  );
+}
+
+function GuidedEmptyState({
+  icon: Icon,
+  title: emptyTitle,
+  text,
+  actionLabel,
+  onAction
+}: {
+  icon: typeof BookOpen;
+  title: string;
+  text: string;
+  actionLabel: string;
+  onAction: () => void;
+}) {
+  return (
+    <div className="guided-empty-state">
+      <Icon size={26} />
+      <div>
+        <strong>{emptyTitle}</strong>
+        <p>{text}</p>
+      </div>
+      <button onClick={onAction}>{actionLabel} <ChevronRight size={16} /></button>
+    </div>
   );
 }
 
@@ -2107,45 +2236,251 @@ function WordListsView({
   );
 }
 
-function ProgressView({ dashboard }: { dashboard: Dashboard | null }) {
-  if (!dashboard) return null;
+function AccuracyTrend({ points }: { points: Dashboard["stats"]["accuracy_trend"] }) {
+  const activeDays = points.filter((point) => point.total_attempts > 0);
+  const maxAttempts = Math.max(...points.map((point) => point.total_attempts), 1);
   return (
-    <section className="page-grid">
-      <div className="panel">
-        <h1>Progress</h1>
-        <div className="metric-grid vertical">
-          <Metric icon={BookOpen} label="Core 5K Coverage" value={`${dashboard.core5k.coverage_percent}%`} sub={`${dashboard.core5k.attempted_words} attempted`} />
-          <Metric icon={CheckCircle2} label="Mastered" value={dashboard.core5k.mastered_words} sub={`${dashboard.core5k.due_today_words} due today`} />
-          <Metric icon={Trophy} label="Best Streak" value={dashboard.profile.best_streak} sub="days" />
-        </div>
+    <div className="accuracy-trend" role="img" aria-label={`First-try accuracy over ${points.length} days; ${activeDays.length} active days`}>
+      <div className="trend-scale"><span>100%</span><span>50%</span><span>0%</span></div>
+      <div className="trend-bars">
+        {points.map((point) => (
+          <div className={point.total_attempts ? "trend-day active" : "trend-day"} key={point.day}>
+            <i
+              title={`${displayDate(point.day)}: ${Math.round(point.accuracy * 100)}% across ${point.total_attempts} attempts`}
+              style={{
+                "--accuracy": `${Math.max(point.accuracy * 100, point.total_attempts ? 4 : 1)}%`,
+                "--volume": `${Math.max((point.total_attempts / maxAttempts) * 100, point.total_attempts ? 16 : 4)}%`
+              } as CSSProperties}
+            />
+          </div>
+        ))}
       </div>
-      <div className="panel">
-        <h2>Recent Activity</h2>
-        <ActivityList rows={dashboard.recent_activity} />
+      <div className="trend-dates">
+        <span>{points[0] ? displayDate(points[0].day) : ""}</span>
+        <span>{points.length ? displayDate(points[points.length - 1].day) : ""}</span>
+      </div>
+    </div>
+  );
+}
+
+function ProgressView({ dashboard, onNavigate }: { dashboard: Dashboard | null; onNavigate: (view: ViewKey) => void }) {
+  if (!dashboard) return null;
+  const stats = dashboard.stats;
+  const recommendedAction = nextBestAction(dashboard, null);
+  const hasAttempts = stats.accuracy_trend.some((point) => point.total_attempts > 0);
+  const hasLearningHistory = stats.first_try_accuracy > 0
+    || stats.diagnostic_tested_words > 0
+    || stats.practice_distinct_words > 0
+    || stats.dictation_distinct_words > 0
+    || stats.oxford_explored_words > 0;
+  const recentModeRows = stats.recent_mode_accuracy.map((mode) => ({
+    label: title(mode.mode),
+    value: Math.round(mode.accuracy * 100),
+    tone: mode.mode === "dictation" ? "orange" : mode.mode === "exploration" ? "green" : "blue",
+    suffix: "%"
+  }));
+  const patternRows = stats.pattern_error_rates.map((pattern) => ({
+    label: pattern.label,
+    value: Math.round(pattern.recent_error_rate * 100),
+    tone: "red",
+    suffix: "%"
+  }));
+
+  return (
+    <section className="progress-screen">
+      <header className="progress-page-head">
+        <div>
+          <p className="eyebrow">Learning report</p>
+          <h1>Progress</h1>
+          <p>Use outcomes to judge learning, and queue health to decide what to do next.</p>
+        </div>
+        <button onClick={() => onNavigate(recommendedAction.view)}>
+          Continue Learning <ChevronRight size={17} />
+        </button>
+      </header>
+
+      {!hasAttempts ? (
+        <GuidedEmptyState
+          icon={TrendingUp}
+          title={hasLearningHistory ? "No activity in the last 14 days" : "No learning trend yet"}
+          text={hasLearningHistory
+            ? "Resume your Daily Plan to refresh accuracy trends and keep reviews from becoming overdue."
+            : "Complete your first Diagnostic session. Accuracy, retention, lapses, and pattern weaknesses will appear here as you practice."}
+          actionLabel={hasLearningHistory ? recommendedAction.actionLabel : "Start Diagnostic"}
+          onAction={() => onNavigate(hasLearningHistory ? recommendedAction.view : "diagnostic")}
+        />
+      ) : null}
+
+      <div className="progress-kpis">
+        <Metric icon={CheckCircle2} label="14-Day Retention" value={percent(stats.retention_accuracy_14d)} sub="Learning outcome: delayed first try" />
+        <Metric icon={XCircle} label="Lapse Rate" value={percent(stats.lapse_rate)} sub="Learning outcome: stable words missed" />
+        <Metric icon={CalendarCheck2} label="Actionable Queue" value={stats.practice_queue_words} sub="Queue health: ready for practice" />
+        <Metric icon={Trophy} label="Stable Known" value={stats.stable_known_words} sub="Learning outcome: audited recall" />
+      </div>
+
+      <div className="page-grid progress-detail-grid">
+        <section className="panel span-2">
+          <div className="section-head">
+            <div>
+              <span className="metric-kind outcome">Learning outcome</span>
+              <h2>14-Day First-Try Trend</h2>
+            </div>
+            <span className="muted">Accuracy and practice volume by day</span>
+          </div>
+          <AccuracyTrend points={stats.accuracy_trend} />
+        </section>
+
+        <section className="panel">
+          <span className="metric-kind outcome">Learning outcome</span>
+          <h2>Recent Mode Accuracy</h2>
+          {recentModeRows.length ? <MiniBars rows={recentModeRows} max={100} /> : <p className="muted">Mode accuracy appears after your first session.</p>}
+        </section>
+
+        <section className="panel">
+          <span className="metric-kind outcome">Learning outcome</span>
+          <h2>Retention Windows</h2>
+          <MiniBars
+            rows={[
+              { label: "7 days", value: Math.round(stats.retention_accuracy_7d * 100), tone: "green", suffix: "%" },
+              { label: "14 days", value: Math.round(stats.retention_accuracy_14d * 100), tone: "blue", suffix: "%" },
+              { label: "30 days", value: Math.round(stats.retention_accuracy_30d * 100), tone: "purple", suffix: "%" },
+              { label: "60 days", value: Math.round(stats.retention_accuracy_60d * 100), tone: "orange", suffix: "%" }
+            ]}
+            max={100}
+          />
+        </section>
+
+        <section className="panel">
+          <span className="metric-kind outcome">Learning outcome</span>
+          <h2>Pattern Weaknesses</h2>
+          {patternRows.length ? <MiniBars rows={patternRows} max={100} /> : <p className="muted">Missed spellings will reveal which letter patterns need attention.</p>}
+        </section>
+
+        <section className="panel">
+          <span className="metric-kind queue">Queue health</span>
+          <h2>What Needs Attention</h2>
+          <MiniBars
+            rows={[
+              { label: "Reviews due", value: stats.due_today_words, tone: "blue" },
+              { label: "Review debt", value: stats.review_debt_words, tone: "red" },
+              { label: "Trouble words", value: stats.trouble_words, tone: "orange" },
+              { label: "Delayed audits", value: stats.due_audit_words, tone: "purple" }
+            ]}
+          />
+        </section>
+
+        <section className="panel">
+          <span className="metric-kind setup">Setup health</span>
+          <h2>Library Coverage</h2>
+          <MiniBars
+            rows={[
+              { label: "Oxford loaded", value: Math.round((stats.oxford_loaded_words / Math.max(stats.oxford_target_words, 1)) * 100), tone: "blue", suffix: "%" },
+              { label: "Explored", value: Math.round((stats.oxford_explored_words / Math.max(stats.oxford_loaded_words, 1)) * 100), tone: "green", suffix: "%" },
+              { label: "Content ready", value: Math.round((stats.content_generated_words / Math.max(stats.oxford_loaded_words, 1)) * 100), tone: "purple", suffix: "%" },
+              { label: "Audio ready", value: Math.round((stats.audio_generated_words / Math.max(stats.oxford_loaded_words, 1)) * 100), tone: "orange", suffix: "%" }
+            ]}
+            max={100}
+          />
+        </section>
+
+        <section className="panel">
+          <div className="section-head">
+            <div>
+              <span className="metric-kind outcome">Learning behavior</span>
+              <h2>Recent Activity</h2>
+            </div>
+          </div>
+          {dashboard.recent_activity.length ? (
+            <ActivityList rows={dashboard.recent_activity} />
+          ) : (
+            <p className="muted">Your completed sessions will appear here.</p>
+          )}
+        </section>
       </div>
     </section>
   );
 }
 
-function AchievementsView() {
+const achievementCategoryDetails: Record<string, { label: string; description: string; view: ViewKey }> = {
+  exploration: { label: "Exploration", description: "Build breadth by meeting useful new words.", view: "exploration" },
+  practice: { label: "Practice", description: "Build consistency through focused repair sessions.", view: "practice" },
+  dictation: { label: "Listening", description: "Connect spoken language with accurate spelling.", view: "dictation" },
+  accuracy: { label: "Accuracy", description: "Improve reliable first-try recall.", view: "diagnostic" },
+  streak: { label: "Consistency", description: "Return regularly enough for spacing to work.", view: "practice" }
+};
+
+function AchievementsView({ onNavigate }: { onNavigate: (view: ViewKey) => void }) {
   const [achievements, setAchievements] = useState<Achievement[]>([]);
   useEffect(() => {
     getJson<Achievement[]>("/achievements").then(setAchievements).catch(() => undefined);
   }, []);
+  const locked = achievements
+    .filter((achievement) => !achievement.unlocked_at)
+    .sort((left, right) => (right.progress / right.target) - (left.progress / left.target));
+  const nextMilestone = locked[0] ?? null;
+  const groups = Object.entries(achievementCategoryDetails)
+    .map(([category, details]) => ({
+      category,
+      details,
+      achievements: achievements.filter((achievement) => achievement.category === category)
+    }))
+    .filter((group) => group.achievements.length);
+
   return (
-    <section className="panel full">
-      <h1>Achievements</h1>
-      <div className="achievement-grid">
-        {achievements.map((achievement) => (
-          <article className={achievement.unlocked_at ? "achievement unlocked" : "achievement"} key={achievement.code}>
-            {achievement.unlocked_at ? <Award /> : <Trophy />}
-            <h3>{achievement.title}</h3>
-            <p>{achievement.description}</p>
-            <div className="progress-line"><i style={{ width: `${Math.min((achievement.progress / achievement.target) * 100, 100)}%` }} /></div>
-            <span>{achievement.progress} / {achievement.target}</span>
-          </article>
-        ))}
-      </div>
+    <section className="achievements-screen">
+      <header className="progress-page-head">
+        <div>
+          <p className="eyebrow">Milestones</p>
+          <h1>Achievements</h1>
+          <p>Milestones reflect the learning behaviors that build durable spelling recall.</p>
+        </div>
+      </header>
+
+      {nextMilestone ? (
+        <section className="next-milestone-band" aria-labelledby="next-milestone-title">
+          <Target size={28} />
+          <div>
+            <span>Next achievable milestone</span>
+            <h2 id="next-milestone-title">{nextMilestone.title}</h2>
+            <p>{Math.max(nextMilestone.target - nextMilestone.progress, 0)} more to complete. {nextMilestone.description}</p>
+            <div className="progress-line"><i style={{ width: `${Math.min((nextMilestone.progress / nextMilestone.target) * 100, 100)}%` }} /></div>
+          </div>
+          <button onClick={() => onNavigate(achievementCategoryDetails[nextMilestone.category]?.view ?? "practice")}>
+            Make Progress <ChevronRight size={17} />
+          </button>
+        </section>
+      ) : achievements.length ? (
+        <section className="next-milestone-band complete">
+          <Award size={28} />
+          <div><span>Milestones complete</span><h2>All current achievements unlocked</h2></div>
+          <button onClick={() => onNavigate("progress")}>View Progress</button>
+        </section>
+      ) : null}
+
+      {groups.map((group) => (
+        <section className="achievement-group" key={group.category}>
+          <div className="achievement-group-head">
+            <div>
+              <h2>{group.details.label}</h2>
+              <p>{group.details.description}</p>
+            </div>
+            <button className="ghost" onClick={() => onNavigate(group.details.view)}>Open {group.details.label}</button>
+          </div>
+          <div className="achievement-grid">
+            {group.achievements.map((achievement) => (
+              <article className={achievement.unlocked_at ? "achievement unlocked" : "achievement"} key={achievement.code}>
+                {achievement.unlocked_at ? <Award /> : <Trophy />}
+                <div>
+                  <h3>{achievement.title}</h3>
+                  <p>{achievement.description}</p>
+                </div>
+                <div className="progress-line"><i style={{ width: `${Math.min((achievement.progress / achievement.target) * 100, 100)}%` }} /></div>
+                <span>{achievement.unlocked_at ? "Unlocked" : `${achievement.progress} / ${achievement.target}`}</span>
+              </article>
+            ))}
+          </div>
+        </section>
+      ))}
     </section>
   );
 }

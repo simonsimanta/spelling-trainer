@@ -209,6 +209,292 @@ p {
   color: #f59e0b;
 }
 
+.next-action-band,
+.next-milestone-band {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  padding: 24px 26px;
+  color: #12372a;
+  background: #ecf8f1;
+  border-top: 1px solid #b9dfc9;
+  border-bottom: 1px solid #b9dfc9;
+}
+
+.next-action-icon {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  color: #ffffff;
+  background: #087a4b;
+  border-radius: 50%;
+}
+
+.next-action-copy,
+.next-milestone-band > div {
+  min-width: 0;
+}
+
+.next-action-copy h2,
+.next-milestone-band h2 {
+  margin: 4px 0 6px;
+  font-size: 24px;
+}
+
+.next-action-copy p,
+.next-milestone-band p {
+  margin-bottom: 12px;
+  color: #365e4d;
+}
+
+.next-action-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #31624e;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.next-action-label strong {
+  padding-left: 10px;
+  border-left: 1px solid #9bcdb0;
+}
+
+.next-action-signals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  color: #2d5a47;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.next-action-signals span::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  display: inline-block;
+  vertical-align: 1px;
+  border-radius: 50%;
+  background: #1d9b62;
+}
+
+.metric-kind {
+  display: block;
+  width: fit-content;
+  margin-bottom: 7px;
+  padding-left: 8px;
+  color: #4d617e;
+  border-left: 3px solid #7b8da8;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.metric-kind.outcome {
+  color: #08704a;
+  border-color: #20a66a;
+}
+
+.metric-kind.queue {
+  color: #9a4e08;
+  border-color: #e78a25;
+}
+
+.metric-kind.setup {
+  color: #315c9c;
+  border-color: #4d80ca;
+}
+
+.guided-empty-state {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 0;
+  color: #42536d;
+  border-top: 1px solid #dce5f2;
+  border-bottom: 1px solid #dce5f2;
+}
+
+.guided-empty-state > svg {
+  color: #2563eb;
+}
+
+.guided-empty-state strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #102044;
+  font-size: 17px;
+}
+
+.guided-empty-state p {
+  margin: 0;
+}
+
+.progress-screen,
+.achievements-screen {
+  display: grid;
+  gap: 18px;
+}
+
+.progress-page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 6px 2px 18px;
+  border-bottom: 1px solid #ccd8e8;
+}
+
+.progress-page-head h1 {
+  margin-bottom: 6px;
+  font-size: 32px;
+}
+
+.progress-page-head p:last-child {
+  margin-bottom: 0;
+  color: #53627c;
+}
+
+.progress-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.progress-detail-grid {
+  align-items: start;
+}
+
+.accuracy-trend {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  grid-template-rows: 180px auto;
+  gap: 8px 10px;
+  margin-top: 18px;
+}
+
+.trend-scale {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  color: #7890b4;
+  font-size: 11px;
+}
+
+.trend-bars {
+  display: grid;
+  grid-template-columns: repeat(14, minmax(8px, 1fr));
+  align-items: end;
+  gap: 7px;
+  min-width: 0;
+  padding-top: 1px;
+  background: repeating-linear-gradient(to bottom, #dce5f2 0 1px, transparent 1px 50%);
+  border-bottom: 1px solid #bdcadb;
+}
+
+.trend-day {
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.trend-day i {
+  width: var(--volume);
+  height: var(--accuracy);
+  min-width: 3px;
+  display: block;
+  background: #cbd5e1;
+  border-radius: 4px 4px 0 0;
+}
+
+.trend-day.active i {
+  background: #168b59;
+}
+
+.trend-dates {
+  grid-column: 2;
+  display: flex;
+  justify-content: space-between;
+  color: #7890b4;
+  font-size: 11px;
+}
+
+.next-milestone-band {
+  color: #3e2c08;
+  background: #fff8e6;
+  border-color: #ecd28c;
+}
+
+.next-milestone-band > svg {
+  color: #b66b08;
+}
+
+.next-milestone-band > div > span {
+  color: #845716;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.next-milestone-band p {
+  color: #6d5730;
+}
+
+.next-milestone-band .progress-line {
+  max-width: 560px;
+  background: #eadfbf;
+}
+
+.next-milestone-band.complete {
+  color: #12372a;
+  background: #ecf8f1;
+  border-color: #b9dfc9;
+}
+
+.achievement-group {
+  padding-top: 22px;
+  border-top: 1px solid #ccd8e8;
+}
+
+.achievement-group-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.achievement-group-head h2 {
+  margin-bottom: 4px;
+}
+
+.achievement-group-head p {
+  margin-bottom: 0;
+  color: #617293;
+}
+
+.achievement-group .achievement-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.achievement h3,
+.achievement p {
+  margin-bottom: 4px;
+}
+
+.achievement > span {
+  color: #617293;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .metric-grid,
 .analytics-grid,
 .mode-grid,
@@ -2127,6 +2413,11 @@ p {
     grid-template-columns: 1fr;
   }
 
+  .progress-kpis,
+  .achievement-group .achievement-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .readiness-head {
     align-items: stretch;
     flex-direction: column;
@@ -2162,7 +2453,8 @@ p {
   .action-row,
   .workbench-head,
   .practice-title-row,
-  .practice-goal-footer {
+  .practice-goal-footer,
+  .progress-page-head {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -2213,6 +2505,38 @@ p {
 @media (max-width: 620px) {
   .content {
     padding: 14px;
+  }
+
+  .next-action-band,
+  .next-milestone-band,
+  .guided-empty-state {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    padding: 20px 16px;
+  }
+
+  .next-action-band > button,
+  .next-milestone-band > button,
+  .guided-empty-state > button {
+    width: 100%;
+  }
+
+  .progress-kpis,
+  .achievement-group .achievement-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .achievement-group-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .accuracy-trend {
+    grid-template-columns: 34px minmax(0, 1fr);
+  }
+
+  .trend-bars {
+    gap: 3px;
   }
 
   .choice-grid,

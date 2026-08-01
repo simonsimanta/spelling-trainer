@@ -395,6 +395,13 @@ class DashboardPatternMetric(BaseModel):
     recent_error_rate: float
 
 
+class DashboardTrendPoint(BaseModel):
+    day: date
+    total_attempts: int
+    correct_attempts: int
+    accuracy: float
+
+
 class DashboardStats(BaseModel):
     oxford_target_words: int = 5000
     oxford_loaded_words: int
@@ -430,6 +437,18 @@ class DashboardStats(BaseModel):
     content_generated_words: int
     audio_generated_words: int
     pattern_error_rates: List[DashboardPatternMetric] = Field(default_factory=list)
+    recent_mode_accuracy: List[SpellingModeMetric] = Field(default_factory=list)
+    accuracy_trend: List[DashboardTrendPoint] = Field(default_factory=list)
+
+
+class SpellingDailyPlanOut(BaseModel):
+    recommended_mode: str
+    recommended_reason: str
+    mode_scores: Dict[str, float] = Field(default_factory=dict)
+    due_reviews: int
+    mistake_words: int
+    new_words: int
+    dictation_ready: int
 
 
 class DashboardOut(BaseModel):
@@ -442,16 +461,7 @@ class DashboardOut(BaseModel):
     practice_time_seconds: int
     recent_activity: List[ActivityRead]
     achievements: List[AchievementRead]
-
-
-class SpellingDailyPlanOut(BaseModel):
-    recommended_mode: str
-    recommended_reason: str
-    mode_scores: Dict[str, float] = Field(default_factory=dict)
-    due_reviews: int
-    mistake_words: int
-    new_words: int
-    dictation_ready: int
+    daily_plan: SpellingDailyPlanOut
 
 
 class ContentBulkGenerateRequest(BaseModel):

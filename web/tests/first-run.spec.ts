@@ -60,13 +60,29 @@ const firstRunDashboard = {
     llm_pending_suggestions: 0,
     content_generated_words: 0,
     audio_generated_words: 0,
-    pattern_error_rates: []
+    pattern_error_rates: [],
+    recent_mode_accuracy: [],
+    accuracy_trend: Array.from({ length: 14 }, (_, index) => ({
+      day: `2026-07-${String(index + 18).padStart(2, "0")}`,
+      total_attempts: 0,
+      correct_attempts: 0,
+      accuracy: 0
+    }))
   },
   words_learned: 0,
   accuracy: 0,
   practice_time_seconds: 0,
   recent_activity: [],
-  achievements: []
+  achievements: [],
+  daily_plan: {
+    recommended_mode: "diagnostic",
+    recommended_reason: "Start with a short diagnostic so the trainer can build a focused practice queue.",
+    mode_scores: { diagnostic: 100, practice: 0, review_due: 0, exploration: 0, dictation: 0 },
+    due_reviews: 0,
+    mistake_words: 0,
+    new_words: 19,
+    dictation_ready: 0
+  }
 };
 
 const diagnosticSession = {
@@ -126,15 +142,81 @@ test("first-run dashboard exposes Diagnostic and starts a diagnostic session", a
   await page.goto("/");
 
   await expect(page.getByRole("navigation").getByRole("button", { name: "Diagnostic" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Run your diagnostic baseline" })).toBeVisible();
+  await expect(page.getByText("Next best action")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Choose a Mode" })).toBeVisible();
   await expect(page.getByText("19 ready")).toBeVisible();
 
-  await page.getByRole("navigation").getByRole("button", { name: "Diagnostic" }).click();
+  await page.getByRole("button", { name: "Start Diagnostic" }).first().click();
   await page.getByRole("button", { name: /Start Diagnostic/ }).click();
 
   await expect(page.getByText("Question 1 of 1")).toBeVisible();
   await expect(page.getByText("Starter Diagnostic")).toBeVisible();
   await expect(page.getByPlaceholder("Type the spelling here...")).toBeFocused();
+});
+
+test("progress guides a first-session learner instead of showing empty analytics", async ({ page }) => {
+  await page.route("**/dashboard", async (route) => {
+    await route.fulfill({ json: firstRunDashboard });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Progress" }).click();
+
+  await expect(page.getByRole("heading", { name: "Progress" })).toBeVisible();
+  await expect(page.getByText("No learning trend yet")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start Diagnostic" })).toBeVisible();
+  await expect(page.getByText("Learning outcome", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Queue health", { exact: true })).toBeVisible();
+  await expect(page.getByText("Setup health", { exact: true })).toBeVisible();
+});
+
+test("achievements group learning behaviors and recommend the nearest milestone", async ({ page }) => {
+  await page.route("**/dashboard", async (route) => {
+    await route.fulfill({ json: firstRunDashboard });
+  });
+  await page.route("**/achievements", async (route) => {
+    await route.fulfill({
+      json: [
+        {
+          code: "explore_10",
+          title: "Curious Starter",
+          description: "Explore 10 new words.",
+          category: "exploration",
+          target: 10,
+          progress: 4,
+          unlocked_at: null
+        },
+        {
+          code: "practice_5",
+          title: "Focused Practice",
+          description: "Complete 5 practice sessions.",
+          category: "practice",
+          target: 5,
+          progress: 4,
+          unlocked_at: null
+        },
+        {
+          code: "accuracy_80",
+          title: "Accurate Recall",
+          description: "Reach 80 percent first-try accuracy.",
+          category: "accuracy",
+          target: 80,
+          progress: 20,
+          unlocked_at: null
+        }
+      ]
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Achievements" }).click();
+
+  await expect(page.getByText("Next achievable milestone")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Focused Practice", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Exploration" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Practice", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Accuracy", exact: true })).toBeVisible();
 });
 
 test("settings shows cache status for the selected TTS variant", async ({ page }) => {

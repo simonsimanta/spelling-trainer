@@ -2885,6 +2885,64 @@ def _dashboard_pattern_metrics(db: Session, limit: int = 5) -> List[schemas.Dash
     ]
 
 
+def _recent_mode_accuracy(db: Session, days: int = 14) -> List[schemas.SpellingModeMetric]:
+    start = date.today() - timedelta(days=max(days - 1, 0))
+    rows = db.execute(
+        select(
+            models.SpellingAttempt.mode,
+            func.count(models.SpellingAttempt.id),
+            func.sum(func.cast(models.SpellingAttempt.is_correct, Integer)),
+        )
+        .where(
+            models.SpellingAttempt.retry_index == 0,
+            models.SpellingAttempt.attempt_date >= start,
+        )
+        .group_by(models.SpellingAttempt.mode)
+    ).all()
+    return [
+        schemas.SpellingModeMetric(
+            mode=mode.value if hasattr(mode, "value") else str(mode),
+            total_attempts=int(total or 0),
+            correct_attempts=int(correct or 0),
+            accuracy=round(int(correct or 0) / int(total or 1), 4),
+        )
+        for mode, total, correct in rows
+    ]
+
+
+def _accuracy_trend(db: Session, days: int = 14) -> List[schemas.DashboardTrendPoint]:
+    start = date.today() - timedelta(days=max(days - 1, 0))
+    rows = db.execute(
+        select(
+            models.SpellingAttempt.attempt_date,
+            func.count(models.SpellingAttempt.id),
+            func.sum(func.cast(models.SpellingAttempt.is_correct, Integer)),
+        )
+        .where(
+            models.SpellingAttempt.retry_index == 0,
+            models.SpellingAttempt.attempt_date >= start,
+        )
+        .group_by(models.SpellingAttempt.attempt_date)
+    ).all()
+    by_day = {
+        attempted_on: (int(total or 0), int(correct or 0))
+        for attempted_on, total, correct in rows
+    }
+    points: List[schemas.DashboardTrendPoint] = []
+    for offset in range(days):
+        attempted_on = start + timedelta(days=offset)
+        total, correct = by_day.get(attempted_on, (0, 0))
+        points.append(
+            schemas.DashboardTrendPoint(
+                day=attempted_on,
+                total_attempts=total,
+                correct_attempts=correct,
+                accuracy=round(correct / total, 4) if total else 0.0,
+            )
+        )
+    return points
+
+
 def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
     today = date.today()
     oxford_word_ids = (
@@ -3029,6 +3087,8 @@ def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
         content_generated_words=content_generated_words,
         audio_generated_words=audio_generated_words,
         pattern_error_rates=_dashboard_pattern_metrics(db),
+        recent_mode_accuracy=_recent_mode_accuracy(db),
+        accuracy_trend=_accuracy_trend(db),
     )
 
 
@@ -3055,4 +3115,5 @@ def get_dashboard(db: Session) -> schemas.DashboardOut:
         practice_time_seconds=profile.practice_time_seconds,
         recent_activity=[schemas.ActivityRead.model_validate(row) for row in activity],
         achievements=[schemas.AchievementRead.model_validate(row) for row in achievements[:5]],
+        daily_plan=get_spelling_daily_plan(db),
     )

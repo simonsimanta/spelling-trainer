@@ -98,6 +98,8 @@ def test_spelling_only_public_app_and_dashboard() -> None:
         "content_generated_words",
         "audio_generated_words",
         "pattern_error_rates",
+        "recent_mode_accuracy",
+        "accuracy_trend",
     }
     assert expected_keys.issubset(stats.keys())
     assert stats["oxford_target_words"] == 5000
@@ -111,9 +113,85 @@ def test_spelling_only_public_app_and_dashboard() -> None:
     assert stats["exploration_accuracy"] == 0.0
     assert stats["retention_accuracy_14d"] == 0.0
     assert stats["lapse_rate"] == 0.0
+    assert len(stats["accuracy_trend"]) == 14
+    assert all(point["total_attempts"] == 0 for point in stats["accuracy_trend"])
+    assert dashboard.json()["daily_plan"]["recommended_mode"] == "diagnostic"
+    assert dashboard.json()["daily_plan"]["new_words"] == 19
 
     for path in ["/categories", "/habits", "/logs", "/journal", "/summary", "/metrics"]:
         assert client.get(path).status_code == 404
+
+
+def test_dashboard_recent_accuracy_uses_first_try_attempts_from_last_14_days() -> None:
+    _seed_core_words()
+    db = SessionLocal()
+    try:
+        word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "accommodation"))
+        assert word is not None
+        db.add_all(
+            [
+                models.SpellingAttempt(
+                    word_id=word.id,
+                    attempt_date=date.today(),
+                    attempt_text="accommodation",
+                    is_correct=True,
+                    mode=models.SpellingMode.practice,
+                ),
+                models.SpellingAttempt(
+                    word_id=word.id,
+                    attempt_date=date.today(),
+                    attempt_text="acommodation",
+                    is_correct=False,
+                    mode=models.SpellingMode.practice,
+                ),
+                models.SpellingAttempt(
+                    word_id=word.id,
+                    attempt_date=date.today(),
+                    attempt_text="accommodation",
+                    is_correct=True,
+                    mode=models.SpellingMode.dictation,
+                ),
+                models.SpellingAttempt(
+                    word_id=word.id,
+                    attempt_date=date.today(),
+                    attempt_text="accommodation",
+                    is_correct=True,
+                    mode=models.SpellingMode.practice,
+                    retry_index=1,
+                ),
+                models.SpellingAttempt(
+                    word_id=word.id,
+                    attempt_date=date.today() - timedelta(days=14),
+                    attempt_text="accommodation",
+                    is_correct=True,
+                    mode=models.SpellingMode.practice,
+                ),
+            ]
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    stats = _client().get("/dashboard").json()["stats"]
+    modes = {row["mode"]: row for row in stats["recent_mode_accuracy"]}
+    assert modes["practice"] == {
+        "mode": "practice",
+        "total_attempts": 2,
+        "correct_attempts": 1,
+        "accuracy": 0.5,
+    }
+    assert modes["dictation"] == {
+        "mode": "dictation",
+        "total_attempts": 1,
+        "correct_attempts": 1,
+        "accuracy": 1.0,
+    }
+    assert stats["accuracy_trend"][-1] == {
+        "day": date.today().isoformat(),
+        "total_attempts": 3,
+        "correct_attempts": 2,
+        "accuracy": 0.6667,
+    }
 
 
 def test_word_management_filters_counts_and_attempt_metadata() -> None:

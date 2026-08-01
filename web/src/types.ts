@@ -57,6 +57,16 @@ export type Achievement = {
   unlocked_at?: string | null;
 };
 
+export type DailyPlan = {
+  recommended_mode: string;
+  recommended_reason: string;
+  mode_scores: Record<string, number>;
+  due_reviews: number;
+  mistake_words: number;
+  new_words: number;
+  dictation_ready: number;
+};
+
 export type Dashboard = {
   profile: Profile;
   overview: Overview;
@@ -102,12 +112,25 @@ export type Dashboard = {
       incorrect_attempts: number;
       recent_error_rate: number;
     }>;
+    recent_mode_accuracy: Array<{
+      mode: string;
+      total_attempts: number;
+      correct_attempts: number;
+      accuracy: number;
+    }>;
+    accuracy_trend: Array<{
+      day: string;
+      total_attempts: number;
+      correct_attempts: number;
+      accuracy: number;
+    }>;
   };
   words_learned: number;
   accuracy: number;
   practice_time_seconds: number;
   recent_activity: Activity[];
   achievements: Achievement[];
+  daily_plan: DailyPlan;
 };
 
 export type Word = {

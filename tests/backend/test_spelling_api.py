@@ -116,6 +116,176 @@ def test_spelling_only_public_app_and_dashboard() -> None:
         assert client.get(path).status_code == 404
 
 
+def test_word_management_filters_counts_and_attempt_metadata() -> None:
+    _seed_core_words()
+    db = SessionLocal()
+    try:
+        personal = repository.create_spelling_word(
+            db,
+            schemas.SpellingWordCreate(term="meticulous", level="personal", source="manual"),
+        )
+        personal.short_meaning = "Very careful and precise."
+        personal.cefr_level = "C1"
+        review = db.scalar(
+            select(models.SpellingReview).where(models.SpellingReview.word_id == personal.id)
+        )
+        assert review is not None
+        review.current_stage = models.SpellingStage.trouble
+        review.incorrect_count = 2
+        personal.mastery_state = "lapse"
+        db.add(
+            models.SpellingAttempt(
+                word_id=personal.id,
+                attempt_date=date.today(),
+                attempt_text="meticuluous",
+                is_correct=False,
+                mode=models.SpellingMode.practice,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    client = _client()
+    response = client.get(
+        "/spelling/word-management",
+        params={"category": "trouble", "query": "precise", "sort": "last_attempt", "direction": "desc"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["counts"]["all"] == 20
+    assert payload["counts"]["oxford"] == 4
+    assert payload["counts"]["personal"] == 1
+    assert payload["counts"]["trouble"] == 1
+    assert payload["counts"]["seed"] == 15
+    row = payload["items"][0]
+    assert row["term"] == "meticulous"
+    assert row["source_label"] == "Personal"
+    assert row["cefr_level"] == "C1"
+    assert row["review_stage"] == "trouble"
+    assert row["last_attempt_at"]
+    assert row["last_attempt_correct"] is False
+
+    filtered = client.get(
+        "/spelling/word-management",
+        params={"mastery_state": "lapse", "diagnostic_status": "untested"},
+    )
+    assert filtered.status_code == 200
+    assert [item["term"] for item in filtered.json()["items"]] == ["meticulous"]
+
+    ranked_oxford = client.get(
+        "/spelling/word-management",
+        params={"category": "oxford", "sort": "frequency_rank", "limit": 1},
+    )
+    assert ranked_oxford.status_code == 200
+    assert ranked_oxford.json()["items"][0]["frequency_rank"] == 1
+
+
+def test_word_management_actions_editing_duplicates_and_targeted_practice() -> None:
+    _seed_core_words()
+    client = _client()
+
+    created = client.post(
+        "/spelling/words",
+        json={"term": "perseverance", "level": "personal", "source": "manual"},
+    )
+    assert created.status_code == 200
+    word_id = created.json()["id"]
+
+    duplicate = client.post(
+        "/spelling/words",
+        json={"term": " Perseverance ", "level": "personal", "source": "manual"},
+    )
+    assert duplicate.status_code == 409
+    assert "already exists in Personal" in duplicate.json()["detail"]
+
+    updated = client.patch(
+        f"/spelling/words/{word_id}",
+        json={
+            "term": "perseverance",
+            "short_meaning": "Continuing despite difficulty.",
+            "part_of_speech": "noun",
+            "cefr_level": "B2",
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["short_meaning"] == "Continuing despite difficulty."
+
+    oxford = client.get(
+        "/spelling/word-management",
+        params={"category": "oxford", "limit": 1},
+    ).json()["items"][0]
+    forbidden_edit = client.patch(
+        f"/spelling/words/{oxford['id']}",
+        json={"short_meaning": "Not editable here."},
+    )
+    assert forbidden_edit.status_code == 403
+
+    queued = client.post(
+        f"/spelling/words/{word_id}/actions",
+        json={"action": "practice"},
+    )
+    assert queued.status_code == 200
+    session = client.post(
+        "/spelling/sessions",
+        json={
+            "session_type": "practice",
+            "target_size": 1,
+            "exercise_type": "mixed",
+            "word_ids": [word_id],
+        },
+    )
+    assert session.status_code == 200
+    assert session.json()["total_items"] == 1
+    assert session.json()["items"][0]["word_id"] == word_id
+    assert session.json()["items"][0]["source_reason"] == "selected from Word Lists"
+
+    known = client.post(
+        f"/spelling/words/{word_id}/actions",
+        json={"action": "mark_known"},
+    )
+    assert known.status_code == 200
+    stable_words = client.get(
+        "/spelling/word-management",
+        params={"category": "stable", "query": "perseverance"},
+    ).json()
+    assert stable_words["total"] == 1
+
+    reset = client.post(
+        f"/spelling/words/{word_id}/actions",
+        json={"action": "reset"},
+    )
+    assert reset.status_code == 200
+    reset_word = client.get(
+        "/spelling/word-management",
+        params={"category": "personal", "query": "perseverance"},
+    ).json()["items"][0]
+    assert reset_word["mastery_state"] == "new"
+    assert reset_word["diagnostic_status"] == "untested"
+
+    archived = client.post(
+        f"/spelling/words/{word_id}/actions",
+        json={"action": "archive"},
+    )
+    assert archived.status_code == 200
+    archived_words = client.get(
+        "/spelling/word-management",
+        params={"category": "archived", "query": "perseverance"},
+    ).json()
+    assert archived_words["total"] == 1
+
+    restored = client.post(
+        f"/spelling/words/{word_id}/actions",
+        json={"action": "restore"},
+    )
+    assert restored.status_code == 200
+    assert client.get(
+        "/spelling/word-management",
+        params={"category": "personal", "query": "perseverance"},
+    ).json()["total"] == 1
+
+
 def test_readiness_reports_current_database_schema(tmp_path) -> None:
     ready_engine = create_engine(f"sqlite:///{tmp_path / 'ready.db'}")
     try:

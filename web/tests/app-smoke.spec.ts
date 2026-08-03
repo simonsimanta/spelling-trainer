@@ -1,0 +1,164 @@
+import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+
+import {
+  dashboardWithStats,
+  dictationSession,
+  firstRunDashboard,
+  oxfordLoadStatus,
+  pendingBulkStatus,
+  practiceSession,
+  readyEnvironment,
+  readySettings
+} from "./fixtures/app-data";
+
+function captureBrowserErrors(page: Page): string[] {
+  const errors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error" && !message.text().toLowerCase().includes("favicon")) {
+      errors.push(`console: ${message.text()}`);
+    }
+  });
+  page.on("pageerror", (error) => errors.push(`page: ${error.message}`));
+  return errors;
+}
+
+async function mockAppShell(page: Page, dashboard = firstRunDashboard) {
+  await page.route("**/readiness", (route) => route.fulfill({ json: readyEnvironment }));
+  await page.route("**/dashboard", (route) => route.fulfill({ json: dashboard }));
+}
+
+test("Dashboard renders without browser errors", async ({ page }) => {
+  const browserErrors = captureBrowserErrors(page);
+  await mockAppShell(page);
+
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: "Run your diagnostic baseline" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Choose a Mode" })).toBeVisible();
+  expect(browserErrors).toEqual([]);
+});
+
+test("Exploration explains an empty source pool and offers a recovery action", async ({ page }) => {
+  const browserErrors = captureBrowserErrors(page);
+  await mockAppShell(page);
+  await page.route("**/spelling/exploration/next?*", (route) => {
+    route.fulfill({ json: null });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Exploration" }).click();
+
+  await expect(page.getByRole("heading", { name: "Exploration pool is empty" })).toBeVisible();
+  await expect(page.getByText("Oxford words are not loaded yet.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Load Oxford Words" })).toBeVisible();
+  expect(browserErrors).toEqual([]);
+});
+
+test("Practice covers empty and populated queues with deterministic sessions", async ({ page }) => {
+  const browserErrors = captureBrowserErrors(page);
+  let useEmptySession = true;
+  const dashboard = dashboardWithStats({ diagnostic_ready_words: 19, practice_queue_words: 1 });
+  await mockAppShell(page, dashboard);
+  await page.route("**/spelling/sessions", (route) => {
+    route.fulfill({
+      json: useEmptySession
+        ? { ...practiceSession, total_items: 0, items: [] }
+        : practiceSession
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Practice" }).click();
+  await page.getByRole("button", { name: "Start Practice" }).click();
+  await expect(page.getByRole("heading", { name: "No practice words yet" })).toBeVisible();
+  await expect(page.getByText("19 diagnostic words are ready.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Back" }).click();
+  useEmptySession = false;
+  await page.getByRole("button", { name: "Start Practice" }).click();
+  await expect(page.getByText("Question 1 of 1")).toBeVisible();
+  await expect(page.getByPlaceholder("Type the spelling here...")).toBeFocused();
+  expect(browserErrors).toEqual([]);
+});
+
+test("Dictation covers empty and populated queues with deterministic sessions", async ({ page }) => {
+  const browserErrors = captureBrowserErrors(page);
+  let useEmptySession = true;
+  const dashboard = dashboardWithStats({ diagnostic_ready_words: 19, dictation_ready_words: 1 });
+  await mockAppShell(page, dashboard);
+  await page.route("**/spelling/sessions", (route) => {
+    route.fulfill({
+      json: useEmptySession
+        ? { ...dictationSession, total_items: 0, items: [] }
+        : dictationSession
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Dictation" }).click();
+  await page.getByRole("button", { name: "Start Dictation" }).click();
+  await expect(page.getByRole("heading", { name: "No dictation words yet" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Back" }).click();
+  useEmptySession = false;
+  await page.getByRole("button", { name: "Start Dictation" }).click();
+  await expect(page.getByRole("heading", { name: "Sentence Dictation" })).toBeVisible();
+  await expect(page.getByText("1 / 1")).toBeVisible();
+  await expect(page.getByPlaceholder("Type the sentence here...")).toBeVisible();
+  expect(browserErrors).toEqual([]);
+});
+
+test("Settings previews a content batch before generation", async ({ page }) => {
+  const browserErrors = captureBrowserErrors(page);
+  await mockAppShell(page);
+  await page.route("**/settings", (route) => route.fulfill({ json: readySettings }));
+  await page.route("**/spelling/oxford/load-status", (route) => route.fulfill({ json: oxfordLoadStatus }));
+  await page.route("**/spelling/content/bulk-status", (route) => route.fulfill({ json: pendingBulkStatus }));
+  await page.route("**/spelling/audio/bulk-status?*", (route) => {
+    route.fulfill({ json: { ...pendingBulkStatus, voice: "alloy", model: "gpt-4o-mini-tts" } });
+  });
+  await page.route("**/spelling/content/bulk-preview?*", (route) => {
+    route.fulfill({
+      json: {
+        total_words: 4,
+        generated: 0,
+        pending: 4,
+        failed: 0,
+        will_process: 4,
+        limit: 100,
+        estimated_api_calls: 4,
+        model: "gpt-4o-mini",
+        voice: null
+      }
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Preview Content Batch" }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "Generate word learning content" })).toBeVisible();
+  await expect(dialog).toContainText("This may use OpenAI API quota.");
+  await expect(dialog.getByRole("button", { name: "Generate batch" })).toBeVisible();
+  expect(browserErrors).toEqual([]);
+});
+
+test("mobile navigation remains usable across the full tab list", async ({ page }) => {
+  const browserErrors = captureBrowserErrors(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockAppShell(page);
+  await page.route("**/settings", (route) => route.fulfill({ json: readySettings }));
+  await page.route("**/spelling/oxford/load-status", (route) => route.fulfill({ json: oxfordLoadStatus }));
+  await page.route("**/spelling/content/bulk-status", (route) => route.fulfill({ json: pendingBulkStatus }));
+  await page.route("**/spelling/audio/bulk-status?*", (route) => route.fulfill({ json: pendingBulkStatus }));
+
+  await page.goto("/");
+  const navigation = page.getByRole("navigation");
+  await expect(navigation.getByRole("button", { name: "Dashboard" })).toBeVisible();
+  await navigation.getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
+  await expect(navigation).toHaveCSS("overflow-x", "auto");
+  expect(browserErrors).toEqual([]);
+});

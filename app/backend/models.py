@@ -258,7 +258,11 @@ class SpellingAttempt(Base):
     __tablename__ = "spelling_attempts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    word_id: Mapped[int] = mapped_column(ForeignKey("spelling_words.id", ondelete="CASCADE"), nullable=False)
+    word_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_words.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     attempt_date: Mapped[date] = mapped_column(Date, nullable=False)
     attempt_text: Mapped[str] = mapped_column(String(120), nullable=False)
     is_correct: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -300,7 +304,11 @@ class SpellingSuggestion(Base):
     __table_args__ = (UniqueConstraint("term", name="uq_spelling_suggestion_term"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    word_id: Mapped[Optional[int]] = mapped_column(ForeignKey("spelling_words.id", ondelete="SET NULL"), nullable=True)
+    word_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_words.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     term: Mapped[str] = mapped_column(String(120), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
@@ -331,7 +339,11 @@ class SpellingWordPattern(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     word_id: Mapped[int] = mapped_column(ForeignKey("spelling_words.id", ondelete="CASCADE"), nullable=False)
-    pattern_id: Mapped[int] = mapped_column(ForeignKey("spelling_patterns.id", ondelete="CASCADE"), nullable=False)
+    pattern_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_patterns.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     strength: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
 
     word = relationship("SpellingWord", back_populates="pattern_links")
@@ -357,7 +369,11 @@ class SpellingConfusionGroupWord(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("spelling_confusion_groups.id", ondelete="CASCADE"), nullable=False)
-    word_id: Mapped[int] = mapped_column(ForeignKey("spelling_words.id", ondelete="CASCADE"), nullable=False)
+    word_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_words.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     group = relationship("SpellingConfusionGroup", back_populates="words")
@@ -422,7 +438,11 @@ class ActivityEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     event_type: Mapped[str] = mapped_column(String(60), nullable=False)
-    word_id: Mapped[Optional[int]] = mapped_column(ForeignKey("spelling_words.id", ondelete="SET NULL"), nullable=True)
+    word_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_words.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     points: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

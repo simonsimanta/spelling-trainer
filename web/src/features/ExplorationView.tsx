@@ -76,7 +76,7 @@ export function ExplorationView({
   async function playCurrentWord() {
     if (!data) return;
     try {
-      await playAudio(data.word.term);
+      await playAudio(data.word.term, { wordId: data.word.id, mode: "word" });
       setAudioError(null);
     } catch (err) {
       setAudioError(err instanceof Error ? err.message : "Unable to play audio");

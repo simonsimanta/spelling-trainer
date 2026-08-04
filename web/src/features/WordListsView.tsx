@@ -2,6 +2,7 @@ import {
   Archive as ArchiveIcon,
   ArchiveRestore,
   ArrowUpDown,
+  BookOpenCheck,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -9,15 +10,17 @@ import {
   Play,
   RotateCcw,
   Search,
+  Volume2,
   X
 } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 
-import { getJson, patchJson, postJson } from "../api";
+import { getJson, patchJson, playAudio, postJson } from "../api";
 import type {
   ManagedWord,
   SpellingSuggestion,
   Word,
+  WordContent,
   WordManagementCounts,
   WordManagementPage
 } from "../types";
@@ -65,6 +68,39 @@ type WordEditDraft = {
   cefr_level: string;
 };
 
+type ContentReviewDraft = {
+  meaning: string;
+  ipa: string;
+  part_of_speech: string;
+  examples: string;
+  word_family: string;
+  chunked_form: string;
+  mnemonic: string;
+  phonetic_hint: string;
+  review_notes: string;
+};
+
+function contentReviewDraft(content: WordContent): ContentReviewDraft {
+  return {
+    meaning: content.meaning,
+    ipa: content.ipa ?? "",
+    part_of_speech: content.part_of_speech ?? "",
+    examples: content.examples.join("\n"),
+    word_family: content.word_family.map((item) => `${item.term} | ${item.label}`).join("\n"),
+    chunked_form: content.chunked_form ?? "",
+    mnemonic: content.mnemonic ?? "",
+    phonetic_hint: content.phonetic_hint ?? "",
+    review_notes: content.review_notes ?? ""
+  };
+}
+
+function parseWordFamily(value: string): Array<{ term: string; label: string }> {
+  return value.split("\n").map((line) => {
+    const [term, label] = line.split("|").map((item) => item.trim());
+    return { term, label: label || "related" };
+  }).filter((item) => item.term);
+}
+
 function displayDate(value?: string | null): string {
   if (!value) return "Never";
   return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" }).format(new Date(value));
@@ -97,6 +133,11 @@ export function WordListsView({
   const [listError, setListError] = useState<string | null>(null);
   const [editing, setEditing] = useState<ManagedWord | null>(null);
   const [editDraft, setEditDraft] = useState<WordEditDraft | null>(null);
+  const [reviewing, setReviewing] = useState<ManagedWord | null>(null);
+  const [reviewContent, setReviewContent] = useState<WordContent | null>(null);
+  const [reviewDraft, setReviewDraft] = useState<ContentReviewDraft | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
   const limit = 50;
 
   async function load() {
@@ -175,6 +216,59 @@ export function WordListsView({
       await load();
     } catch (err) {
       setListError(err instanceof Error ? err.message : "Unable to update this word.");
+    }
+  }
+
+  async function openContentReview(word: ManagedWord) {
+    setReviewing(word);
+    setReviewContent(null);
+    setReviewDraft(null);
+    setReviewError(null);
+    setReviewBusy(true);
+    try {
+      const content = await getJson<WordContent>(`/spelling/word-content/${word.id}`);
+      setReviewContent(content);
+      setReviewDraft(contentReviewDraft(content));
+      setListError(null);
+    } catch (err) {
+      setReviewing(null);
+      setListError(err instanceof Error ? err.message : "Unable to load this word's content.");
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+
+  function closeContentReview() {
+    setReviewing(null);
+    setReviewContent(null);
+    setReviewDraft(null);
+    setReviewError(null);
+  }
+
+  async function saveContentReview(testAudio: boolean) {
+    if (!reviewing || !reviewDraft) return;
+    setReviewBusy(true);
+    try {
+      const updated = await patchJson<WordContent>(`/spelling/word-content/${reviewing.id}`, {
+        ...reviewDraft,
+        examples: reviewDraft.examples.split("\n").map((item) => item.trim()).filter(Boolean),
+        word_family: parseWordFamily(reviewDraft.word_family)
+      });
+      setReviewContent(updated);
+      setReviewDraft(contentReviewDraft(updated));
+      setFeedback(`${title(reviewing.term)} content was reviewed and saved.`);
+      setReviewError(null);
+      setListError(null);
+      if (testAudio) {
+        await playAudio(reviewing.term, { wordId: reviewing.id, mode: "word", force: true });
+      } else {
+        closeContentReview();
+      }
+      await load();
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : "Unable to save this content review.");
+    } finally {
+      setReviewBusy(false);
     }
   }
 
@@ -430,6 +524,9 @@ export function WordListsView({
                       <button className="icon-button compact" aria-label={`Reset ${word.term}`} title="Reset learning progress" onClick={() => applyWordAction(word, "reset")}>
                         <RotateCcw size={16} />
                       </button>
+                      <button className="icon-button compact" aria-label={`Review content for ${word.term}`} title="Review content and pronunciation" onClick={() => openContentReview(word)}>
+                        <BookOpenCheck size={16} />
+                      </button>
                       {word.is_personal ? (
                         <button className="icon-button compact" aria-label={`Edit ${word.term}`} title="Edit personal word" onClick={() => openEditor(word)}>
                           <Pencil size={16} />
@@ -515,6 +612,86 @@ export function WordListsView({
                 <button>Save changes</button>
               </div>
             </form>
+          </section>
+        </div>
+      ) : null}
+
+      {reviewing ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.currentTarget === event.target && !reviewBusy) closeContentReview();
+        }}>
+          <section className="word-edit-modal content-review-modal" role="dialog" aria-modal="true" aria-labelledby="content-review-title">
+            <div className="section-head">
+              <div>
+                <p className="eyebrow">Content and pronunciation</p>
+                <h2 id="content-review-title">Review {reviewing.term}</h2>
+              </div>
+              <button className="icon-button compact" aria-label="Close content review" title="Close" disabled={reviewBusy} onClick={closeContentReview}>
+                <X size={18} />
+              </button>
+            </div>
+            {reviewBusy && !reviewDraft ? <div className="content-review-loading">Loading content...</div> : null}
+            {reviewDraft ? (
+              <form className="word-edit-form" onSubmit={(event) => {
+                event.preventDefault();
+                saveContentReview(false).catch(() => undefined);
+              }}>
+                {reviewContent ? (
+                  <div className={`content-source-banner ${reviewContent.generation_source}`}>
+                    <strong>{reviewContent.generation_source === "ai" ? "AI generated" : reviewContent.generation_source === "manual" ? "Manually reviewed" : "Deterministic fallback"}</strong>
+                    {reviewContent.fallback_reason ? <span>{reviewContent.fallback_reason}</span> : null}
+                  </div>
+                ) : null}
+                {reviewError ? <div className="banner error" role="alert">{reviewError}</div> : null}
+                <div className="word-edit-grid content-review-grid">
+                  <label>
+                    <span>Part of speech</span>
+                    <input value={reviewDraft.part_of_speech} onChange={(event) => setReviewDraft({ ...reviewDraft, part_of_speech: event.target.value })} />
+                  </label>
+                  <label>
+                    <span>IPA pronunciation</span>
+                    <input value={reviewDraft.ipa} onChange={(event) => setReviewDraft({ ...reviewDraft, ipa: event.target.value })} placeholder="/pronunciation/" />
+                  </label>
+                </div>
+                <label>
+                  <span>Meaning</span>
+                  <textarea value={reviewDraft.meaning} onChange={(event) => setReviewDraft({ ...reviewDraft, meaning: event.target.value })} required />
+                </label>
+                <label>
+                  <span>Examples, one per line</span>
+                  <textarea value={reviewDraft.examples} onChange={(event) => setReviewDraft({ ...reviewDraft, examples: event.target.value })} required />
+                </label>
+                <div className="word-edit-grid content-review-grid">
+                  <label>
+                    <span>Spelling chunks</span>
+                    <input value={reviewDraft.chunked_form} onChange={(event) => setReviewDraft({ ...reviewDraft, chunked_form: event.target.value })} />
+                  </label>
+                  <label>
+                    <span>Pronunciation hint</span>
+                    <input value={reviewDraft.phonetic_hint} onChange={(event) => setReviewDraft({ ...reviewDraft, phonetic_hint: event.target.value })} placeholder="Stress or sound guidance" />
+                  </label>
+                </div>
+                <label>
+                  <span>Mnemonic</span>
+                  <textarea value={reviewDraft.mnemonic} onChange={(event) => setReviewDraft({ ...reviewDraft, mnemonic: event.target.value })} />
+                </label>
+                <label>
+                  <span>Word family, one "word | type" per line</span>
+                  <textarea value={reviewDraft.word_family} onChange={(event) => setReviewDraft({ ...reviewDraft, word_family: event.target.value })} />
+                </label>
+                <label>
+                  <span>Review notes</span>
+                  <textarea value={reviewDraft.review_notes} onChange={(event) => setReviewDraft({ ...reviewDraft, review_notes: event.target.value })} />
+                </label>
+                <div className="modal-actions content-review-actions">
+                  <button type="button" className="secondary" disabled={reviewBusy} onClick={closeContentReview}>Cancel</button>
+                  <button type="button" className="secondary" disabled={reviewBusy} onClick={() => saveContentReview(true)}>
+                    <Volume2 size={17} /> Save &amp; test audio
+                  </button>
+                  <button disabled={reviewBusy}>{reviewBusy ? "Saving..." : "Save review"}</button>
+                </div>
+              </form>
+            ) : null}
           </section>
         </div>
       ) : null}

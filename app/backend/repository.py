@@ -11,6 +11,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.backend import models, schemas
+from app.backend.spelling.content_quality import (
+    ContentGenerationResult,
+    contains_target,
+    normalize_letters,
+    normalize_part_of_speech,
+    structured_content_schema,
+    validate_generated_content,
+)
 
 
 DEFAULT_SPELLING_WORDS = [
@@ -1482,56 +1490,95 @@ def enrich_spelling_word_metadata(
     return word
 
 
-def _fallback_content(word: models.SpellingWord) -> Dict[str, Any]:
-    return {
-        "meaning": word.short_meaning or _meaning_for_word(word.term),
-        "ipa": word.ipa,
-        "part_of_speech": word.part_of_speech or "word",
-        "examples": [word.example_sentence or _example_sentence(word.term)],
-        "word_family": _word_family_for(word.term),
-    }
+def _fallback_content(word: models.SpellingWord, reason: str) -> ContentGenerationResult:
+    example = word.example_sentence or _example_sentence(word.term)
+    if not contains_target(example, word.term):
+        example = f"I practiced spelling the word '{word.term}' carefully."
+    return ContentGenerationResult(
+        data={
+            "meaning": word.short_meaning or _meaning_for_word(word.term),
+            "ipa": word.ipa,
+            "part_of_speech": normalize_part_of_speech(word.part_of_speech),
+            "examples": [
+                example,
+                f"The class used '{word.term}' in a short sentence.",
+            ],
+            "word_family": _word_family_for(word.term),
+            "chunked_form": word.chunked_form or _chunk_hint(word.term),
+            "mnemonic": f"Break {word.term} into {word.chunked_form or _chunk_hint(word.term)} and spell each chunk in order.",
+        },
+        source="fallback",
+        warnings=[reason],
+        fallback_reason=reason,
+    )
 
 
-def _generate_content_with_ai(word: models.SpellingWord, model: Optional[str] = None) -> Dict[str, Any]:
+def _generate_content_with_ai(
+    word: models.SpellingWord,
+    model: Optional[str] = None,
+    enabled: bool = True,
+) -> ContentGenerationResult:
+    if not enabled:
+        return _fallback_content(word, "AI content generation is disabled in Settings.")
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
-        return _fallback_content(word)
+        return _fallback_content(word, "The OpenAI API key is not configured.")
 
     model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    prompt = (
-        "Return JSON with keys meaning, ipa, part_of_speech, examples, word_family. "
-        "examples must be a list of two short sentences. word_family must be a list of "
-        f"objects with term and label. Word: {word.term}."
-    )
+    prompt = f"""Create learner-safe spelling content for the English word: {word.term}
+
+Use the most common modern English pronunciation and meaning. If there are multiple common
+pronunciations, put the alternatives in the IPA field separated by " or ". Each of the two
+short example sentences must contain the exact target word, allowing normal capitalization.
+The chunked form must reproduce every letter of the word in order, separated with hyphens.
+Keep the meaning, examples, and mnemonic clear for a learner aged 10 to 14."""
     try:
         response = requests.post(
             "https://api.openai.com/v1/responses",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model, "input": prompt},
+            json={
+                "model": model,
+                "input": [
+                    {
+                        "role": "system",
+                        "content": "You create accurate, concise English spelling-learning content.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "spelling_word_content",
+                        "strict": True,
+                        "schema": structured_content_schema(),
+                    }
+                },
+            },
             timeout=20,
         )
         if response.status_code >= 400:
-            return _fallback_content(word)
+            return _fallback_content(word, f"OpenAI content generation returned HTTP {response.status_code}.")
         texts: List[str] = []
         for item in response.json().get("output", []):
             for content in item.get("content", []):
                 if content.get("text"):
                     texts.append(content["text"])
-        parsed = json.loads("\n".join(texts).strip())
-        return {
-            "meaning": str(parsed.get("meaning") or _meaning_for_word(word.term)),
-            "ipa": parsed.get("ipa") or word.ipa,
-            "part_of_speech": parsed.get("part_of_speech") or word.part_of_speech or "word",
-            "examples": list(parsed.get("examples") or [word.example_sentence or _example_sentence(word.term)])[:3],
-            "word_family": _sanitize_word_family(word.term, list(parsed.get("word_family") or _word_family_for(word.term))),
-        }
+        if not texts:
+            return _fallback_content(word, "OpenAI returned no spelling content.")
+        output_text = "\n".join(texts).strip()
+        validated = validate_generated_content(word.term, json.loads(output_text))
+        return ContentGenerationResult(data=validated, source="ai", warnings=[])
+    except (ValueError, TypeError) as err:
+        return _fallback_content(word, str(err))
+    except requests.RequestException:
+        return _fallback_content(word, "OpenAI content generation could not be reached.")
     except Exception:
-        return _fallback_content(word)
+        return _fallback_content(word, "OpenAI content generation failed unexpectedly.")
 
 
 def _ensure_word_content(db: Session, word: models.SpellingWord, force: bool = False) -> models.SpellingWordContent:
     content = db.scalar(select(models.SpellingWordContent).where(models.SpellingWordContent.word_id == word.id))
-    if content and not force:
+    if content and (not force or content.status == "reviewed"):
         sanitized_family = _sanitize_word_family(word.term, content.word_family or [])
         if sanitized_family != (content.word_family or []):
             content.word_family = sanitized_family
@@ -1539,22 +1586,31 @@ def _ensure_word_content(db: Session, word: models.SpellingWord, force: bool = F
             db.flush()
         return content
     settings = db.get(models.AppSettings, 1)
-    generated = _generate_content_with_ai(word, model=settings.ai_model if settings else None)
+    generated = _generate_content_with_ai(
+        word,
+        model=settings.ai_model if settings else None,
+        enabled=settings.ai_generation_enabled if settings else True,
+    )
     if not content:
         content = models.SpellingWordContent(word_id=word.id)
         db.add(content)
-    content.meaning = generated["meaning"]
-    content.ipa = generated.get("ipa")
-    content.part_of_speech = generated.get("part_of_speech")
-    content.examples = generated.get("examples") or []
-    content.word_family = generated.get("word_family") or []
-    content.status = "generated"
-    content.error = None
+    content.meaning = generated.data["meaning"]
+    content.ipa = generated.data.get("ipa")
+    content.part_of_speech = generated.data.get("part_of_speech")
+    content.examples = generated.data.get("examples") or []
+    content.word_family = _sanitize_word_family(word.term, generated.data.get("word_family") or [])
+    content.chunked_form = generated.data.get("chunked_form")
+    content.mnemonic = generated.data.get("mnemonic")
+    content.generation_source = generated.source
+    content.quality_warnings = generated.warnings
+    content.status = "generated" if generated.source == "ai" else "fallback"
+    content.error = generated.fallback_reason
     content.generated_at = datetime.utcnow()
     content.updated_at = datetime.utcnow()
     word.short_meaning = word.short_meaning or content.meaning
     word.ipa = word.ipa or content.ipa
     word.part_of_speech = word.part_of_speech or content.part_of_speech
+    word.chunked_form = word.chunked_form or content.chunked_form
     if not word.example_sentence and content.examples:
         word.example_sentence = content.examples[0]
     db.flush()
@@ -1570,6 +1626,13 @@ def _content_to_schema(word: models.SpellingWord, content: models.SpellingWordCo
         part_of_speech=content.part_of_speech,
         examples=list(content.examples or []),
         word_family=list(content.word_family or []),
+        chunked_form=content.chunked_form or word.chunked_form,
+        mnemonic=content.mnemonic,
+        phonetic_hint=word.phonetic_hint,
+        generation_source=content.generation_source,
+        quality_warnings=list(content.quality_warnings or []),
+        fallback_reason=content.error if content.status == "fallback" else None,
+        review_notes=content.review_notes,
         status=content.status,
     )
 
@@ -1580,6 +1643,62 @@ def get_word_content(db: Session, word_id: int) -> schemas.SpellingWordContentRe
         raise ValueError("Word not found")
     content = _ensure_word_content(db, word)
     db.commit()
+    return _content_to_schema(word, content)
+
+
+def override_word_content(
+    db: Session,
+    word_id: int,
+    payload: schemas.SpellingWordContentOverride,
+) -> schemas.SpellingWordContentRead:
+    word = db.get(models.SpellingWord, word_id)
+    if not word:
+        raise ValueError("Word not found")
+    content = _ensure_word_content(db, word)
+    changes = payload.model_dump(exclude_unset=True)
+
+    examples = changes.get("examples")
+    if examples is not None:
+        cleaned_examples = [str(example).strip() for example in examples if str(example).strip()]
+        if not cleaned_examples or any(not contains_target(example, word.term) for example in cleaned_examples):
+            raise ValueError("Every example must contain the target word.")
+        content.examples = cleaned_examples
+        word.example_sentence = cleaned_examples[0]
+
+    family = changes.get("word_family")
+    if family is not None:
+        content.word_family = _sanitize_word_family(word.term, family)
+
+    chunked_form = changes.get("chunked_form")
+    if chunked_form is not None:
+        if chunked_form and normalize_letters(chunked_form) != normalize_letters(word.term):
+            raise ValueError("Chunking must contain every letter of the target word in order.")
+        content.chunked_form = chunked_form.strip() or None
+        word.chunked_form = content.chunked_form
+
+    if "meaning" in changes:
+        content.meaning = changes["meaning"].strip()
+        word.short_meaning = content.meaning
+    if "ipa" in changes:
+        content.ipa = changes["ipa"].strip() or None
+        word.ipa = content.ipa
+    if "part_of_speech" in changes:
+        content.part_of_speech = normalize_part_of_speech(changes["part_of_speech"])
+        word.part_of_speech = content.part_of_speech
+    if "mnemonic" in changes:
+        content.mnemonic = changes["mnemonic"].strip() or None
+    if "phonetic_hint" in changes:
+        word.phonetic_hint = changes["phonetic_hint"].strip() or None
+    if "review_notes" in changes:
+        content.review_notes = changes["review_notes"].strip() or None
+
+    content.status = "reviewed"
+    content.generation_source = "manual"
+    content.quality_warnings = []
+    content.error = None
+    content.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(content)
     return _content_to_schema(word, content)
 
 
@@ -1658,6 +1777,18 @@ def content_bulk_status(db: Session) -> schemas.ContentBulkStatus:
         .where(models.SpellingWordSource.source_name.in_(list(OXFORD_SOURCE_NAMES)))
         .where(models.SpellingWordContent.status == "generated")
     ) or 0
+    fallback = db.scalar(
+        select(func.count(func.distinct(models.SpellingWordContent.word_id)))
+        .join(models.SpellingWordSource, models.SpellingWordSource.word_id == models.SpellingWordContent.word_id)
+        .where(models.SpellingWordSource.source_name.in_(list(OXFORD_SOURCE_NAMES)))
+        .where(models.SpellingWordContent.status == "fallback")
+    ) or 0
+    reviewed = db.scalar(
+        select(func.count(func.distinct(models.SpellingWordContent.word_id)))
+        .join(models.SpellingWordSource, models.SpellingWordSource.word_id == models.SpellingWordContent.word_id)
+        .where(models.SpellingWordSource.source_name.in_(list(OXFORD_SOURCE_NAMES)))
+        .where(models.SpellingWordContent.status == "reviewed")
+    ) or 0
     failed = db.scalar(
         select(func.count(func.distinct(models.SpellingWordContent.word_id)))
         .join(models.SpellingWordSource, models.SpellingWordSource.word_id == models.SpellingWordContent.word_id)
@@ -1667,7 +1798,9 @@ def content_bulk_status(db: Session) -> schemas.ContentBulkStatus:
     return schemas.ContentBulkStatus(
         total_words=total_words,
         generated=generated,
-        pending=max(total_words - int(generated) - int(failed), 0),
+        fallback=fallback,
+        reviewed=reviewed,
+        pending=max(total_words - int(generated) - int(fallback) - int(reviewed) - int(failed), 0),
         failed=failed,
     )
 
@@ -1683,25 +1816,38 @@ def content_bulk_preview(db: Session, limit: int) -> schemas.BulkGeneratePreview
         pending=status.pending,
         failed=status.failed,
         will_process=will_process,
-        estimated_api_calls=will_process if os.getenv("OPENAI_API_KEY", "").strip() else 0,
+        estimated_api_calls=(
+            will_process
+            if settings.ai_generation_enabled and os.getenv("OPENAI_API_KEY", "").strip()
+            else 0
+        ),
         model=settings.ai_model,
+        fallback=status.fallback,
+        reviewed=status.reviewed,
+        ai_generation_enabled=settings.ai_generation_enabled,
     )
 
 
 def content_bulk_generate(db: Session, payload: schemas.ContentBulkGenerateRequest) -> schemas.ContentBulkGenerateResult:
     generated = 0
+    fallback = 0
     cached = 0
     failed = 0
     words = _target_oxford_words(db)
     for word in words:
-        if generated + cached + failed >= payload.limit:
+        if generated + fallback + cached + failed >= payload.limit:
             break
         existing = db.scalar(select(models.SpellingWordContent).where(models.SpellingWordContent.word_id == word.id))
-        if existing and existing.status == "generated" and not payload.force:
+        if existing and existing.status in {"generated", "fallback", "reviewed"} and not payload.force:
             continue
         try:
-            _ensure_word_content(db, word, force=payload.force)
-            generated += 1
+            content = _ensure_word_content(db, word, force=payload.force)
+            if content.status == "fallback":
+                fallback += 1
+            elif content.status == "reviewed":
+                cached += 1
+            else:
+                generated += 1
         except Exception as err:
             failed += 1
             content = existing or models.SpellingWordContent(word_id=word.id)
@@ -1713,6 +1859,7 @@ def content_bulk_generate(db: Session, payload: schemas.ContentBulkGenerateReque
     return schemas.ContentBulkGenerateResult(
         requested_limit=payload.limit,
         generated=generated,
+        fallback=fallback,
         cached=cached,
         failed=failed,
         remaining=status.pending,
@@ -3044,7 +3191,7 @@ def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
         select(func.count(func.distinct(models.SpellingWordContent.word_id)))
         .join(models.SpellingWordSource, models.SpellingWordSource.word_id == models.SpellingWordContent.word_id)
         .where(models.SpellingWordSource.source_name.in_(list(OXFORD_SOURCE_NAMES)))
-        .where(models.SpellingWordContent.status == "generated")
+        .where(models.SpellingWordContent.status.in_(["generated", "fallback", "reviewed"]))
     ) or 0
     audio_generated_words = db.scalar(
         select(func.count(func.distinct(models.SpellingAudioManifest.word_id)))

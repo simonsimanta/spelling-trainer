@@ -208,6 +208,13 @@ export type WordContent = {
   part_of_speech?: string | null;
   examples: string[];
   word_family: Array<{ term: string; label: string }>;
+  chunked_form?: string | null;
+  mnemonic?: string | null;
+  phonetic_hint?: string | null;
+  generation_source: "ai" | "fallback" | "manual";
+  quality_warnings: string[];
+  fallback_reason?: string | null;
+  review_notes?: string | null;
   status: string;
 };
 
@@ -317,6 +324,8 @@ export type ReadinessReport = {
 export type BulkStatus = {
   total_words: number;
   generated: number;
+  fallback?: number;
+  reviewed?: number;
   pending: number;
   failed: number;
   voice?: string | null;
@@ -329,11 +338,13 @@ export type BulkPreview = BulkStatus & {
   estimated_api_calls: number;
   model: string;
   voice?: string | null;
+  ai_generation_enabled?: boolean | null;
 };
 
 export type BulkGenerateResult = {
   requested_limit: number;
   generated: number;
+  fallback?: number;
   cached: number;
   failed: number;
   remaining: number;

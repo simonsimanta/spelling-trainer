@@ -32,13 +32,44 @@ def _normalize_audio_variant(voice: str, model: str) -> tuple[str, str]:
     )
 
 
+def _supports_instructions(model: str) -> bool:
+    return model.strip().lower().startswith("gpt-4o-mini-tts")
+
+
+def pronunciation_instructions(
+    text: str,
+    word: models.SpellingWord | None = None,
+    mode: str = "word",
+) -> str:
+    target = word.term if word else text.strip()
+    guidance: list[str] = []
+    if word and word.phonetic_hint:
+        guidance.append(f"Pronunciation hint: {word.phonetic_hint.strip()}.")
+    if word and word.ipa:
+        guidance.append(f"IPA: {word.ipa.strip()}.")
+    pronunciation = " ".join(guidance)
+    if mode == "dictation" or " " in text.strip():
+        return (
+            f"Read the sentence once at a measured learner pace. Clearly articulate the target "
+            f"spelling word '{target}'. {pronunciation} Do not add commentary."
+        ).strip()
+    return (
+        f"Pronounce the spelling word '{target}' clearly once in neutral English. "
+        f"{pronunciation} Do not spell it aloud or add commentary."
+    ).strip()
+
+
 def audio_cache_path(
     text: str,
     voice: str = DEFAULT_TTS_VOICE,
     model: str = DEFAULT_TTS_MODEL,
+    instructions: str = "",
 ) -> Path:
     normalized_voice, normalized_model = _normalize_audio_variant(voice, model)
-    cache_key = "\0".join([text.strip().lower(), normalized_voice, normalized_model])
+    active_instructions = instructions.strip() if _supports_instructions(normalized_model) else ""
+    cache_key = "\0".join(
+        [text.strip().lower(), normalized_voice, normalized_model, active_instructions]
+    )
     digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
     return audio_cache_dir() / f"{digest}.mp3"
 
@@ -47,6 +78,7 @@ def generate_tts_audio(
     text: str,
     voice: str = DEFAULT_TTS_VOICE,
     model: str = DEFAULT_TTS_MODEL,
+    instructions: str = "",
 ) -> bytes:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -57,15 +89,18 @@ def generate_tts_audio(
 
     normalized_voice, normalized_model = _normalize_audio_variant(voice, model)
     try:
+        payload = {
+            "model": normalized_model,
+            "voice": normalized_voice,
+            "input": text,
+            "response_format": "mp3",
+        }
+        if instructions.strip() and _supports_instructions(normalized_model):
+            payload["instructions"] = instructions.strip()
         response = requests.post(
             "https://api.openai.com/v1/audio/speech",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": normalized_model,
-                "voice": normalized_voice,
-                "input": text,
-                "response_format": "mp3",
-            },
+            json=payload,
             timeout=30,
         )
     except requests.RequestException:
@@ -160,10 +195,12 @@ def bulk_audio_status(
     generated = 0
     failed = 0
     for word in words:
+        instructions = pronunciation_instructions(word.term, word)
         cache_exists = audio_cache_path(
             word.term,
             voice=normalized_voice,
             model=normalized_model,
+            instructions=instructions,
         ).exists()
         if cache_exists:
             generated += 1
@@ -218,7 +255,13 @@ def bulk_generate_audio(
         if processed >= requested_limit:
             break
         manifest = _manifest_for(db, word, voice, model)
-        cache_path = audio_cache_path(word.term, voice=voice, model=model)
+        instructions = pronunciation_instructions(word.term, word)
+        cache_path = audio_cache_path(
+            word.term,
+            voice=voice,
+            model=model,
+            instructions=instructions,
+        )
 
         if (
             manifest.status == "generated"
@@ -237,7 +280,14 @@ def bulk_generate_audio(
             continue
 
         try:
-            cache_path.write_bytes(generate_tts_audio(word.term, voice=voice, model=model))
+            cache_path.write_bytes(
+                generate_tts_audio(
+                    word.term,
+                    voice=voice,
+                    model=model,
+                    instructions=instructions,
+                )
+            )
             manifest.status = "generated"
             manifest.file_path = str(cache_path)
             manifest.error = None
@@ -283,12 +333,23 @@ def preload_audio(
         normalized = text.strip()
         if not normalized:
             continue
-        cache_path = audio_cache_path(normalized, voice=normalized_voice, model=normalized_model)
+        instructions = pronunciation_instructions(normalized)
+        cache_path = audio_cache_path(
+            normalized,
+            voice=normalized_voice,
+            model=normalized_model,
+            instructions=instructions,
+        )
         if cache_path.exists():
             cached += 1
             continue
         cache_path.write_bytes(
-            generate_tts_audio(normalized, voice=normalized_voice, model=normalized_model)
+            generate_tts_audio(
+                normalized,
+                voice=normalized_voice,
+                model=normalized_model,
+                instructions=instructions,
+            )
         )
         generated += 1
 
@@ -305,17 +366,29 @@ def get_audio_response(
     text: str,
     voice: str = DEFAULT_TTS_VOICE,
     model: str = DEFAULT_TTS_MODEL,
+    instructions: str = "",
+    force: bool = False,
 ) -> Response:
     normalized_voice, normalized_model = _normalize_audio_variant(voice, model)
-    cache_path = audio_cache_path(text, voice=normalized_voice, model=normalized_model)
-    if cache_path.exists():
+    cache_path = audio_cache_path(
+        text,
+        voice=normalized_voice,
+        model=normalized_model,
+        instructions=instructions,
+    )
+    if cache_path.exists() and not force:
         return Response(
             content=cache_path.read_bytes(),
             media_type="audio/mpeg",
             headers={"X-Audio-Cache": "hit"},
         )
 
-    audio_bytes = generate_tts_audio(text, voice=normalized_voice, model=normalized_model)
+    audio_bytes = generate_tts_audio(
+        text,
+        voice=normalized_voice,
+        model=normalized_model,
+        instructions=instructions,
+    )
     cache_path.write_bytes(audio_bytes)
     return Response(
         content=audio_bytes,

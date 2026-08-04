@@ -279,6 +279,28 @@ test("word lists supports management, empty search, duplicates, and practice now
       }
     });
   });
+  await page.route("**/spelling/word-content/41", async (route) => {
+    const reviewed = route.request().method() === "PATCH";
+    await route.fulfill({
+      json: {
+        word_id: 41,
+        term: "meticulous",
+        meaning: "Very careful and precise.",
+        ipa: "/məˈtɪkjələs/",
+        part_of_speech: "adjective",
+        examples: ["She kept meticulous notes."],
+        word_family: [{ term: "meticulous", label: "adjective" }],
+        chunked_form: "me-tic-u-lous",
+        mnemonic: "Check each chunk in order.",
+        phonetic_hint: reviewed ? "Stress the second syllable" : null,
+        generation_source: reviewed ? "manual" : "fallback",
+        quality_warnings: reviewed ? [] : ["AI content generation is disabled in Settings."],
+        fallback_reason: reviewed ? null : "AI content generation is disabled in Settings.",
+        review_notes: null,
+        status: reviewed ? "reviewed" : "fallback"
+      }
+    });
+  });
   await page.route("**/spelling/sessions", async (route) => {
     await route.fulfill({
       json: {
@@ -316,6 +338,13 @@ test("word lists supports management, empty search, duplicates, and practice now
   await expect(page.getByRole("tab", { name: "Personal 1" })).toBeVisible();
   await expect(page.getByText("Very careful and precise.")).toBeVisible();
   await expect(page.getByText("Diagnostic: Missed")).toBeVisible();
+
+  await page.getByRole("button", { name: "Review content for meticulous" }).click();
+  const contentDialog = page.getByRole("dialog", { name: "Review meticulous" });
+  await expect(contentDialog.getByText("Deterministic fallback")).toBeVisible();
+  await contentDialog.getByLabel("Pronunciation hint").fill("Stress the second syllable");
+  await contentDialog.getByRole("button", { name: "Save review" }).click();
+  await expect(page.getByText("Meticulous content was reviewed and saved.")).toBeVisible();
 
   await page.getByLabel("New personal word").fill("meticulous");
   await page.getByRole("button", { name: "Add word" }).click();

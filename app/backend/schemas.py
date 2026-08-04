@@ -178,7 +178,26 @@ class SpellingWordContentRead(BaseModel):
     part_of_speech: Optional[str] = None
     examples: List[str] = Field(default_factory=list)
     word_family: List[Dict[str, str]] = Field(default_factory=list)
+    chunked_form: Optional[str] = None
+    mnemonic: Optional[str] = None
+    phonetic_hint: Optional[str] = None
+    generation_source: str = "ai"
+    quality_warnings: List[str] = Field(default_factory=list)
+    fallback_reason: Optional[str] = None
+    review_notes: Optional[str] = None
     status: str = "generated"
+
+
+class SpellingWordContentOverride(BaseModel):
+    meaning: Optional[str] = Field(default=None, min_length=1, max_length=1000)
+    ipa: Optional[str] = Field(default=None, max_length=255)
+    part_of_speech: Optional[str] = Field(default=None, max_length=60)
+    examples: Optional[List[str]] = Field(default=None, min_length=1, max_length=3)
+    word_family: Optional[List[Dict[str, str]]] = Field(default=None, max_length=6)
+    chunked_form: Optional[str] = Field(default=None, max_length=255)
+    mnemonic: Optional[str] = Field(default=None, max_length=500)
+    phonetic_hint: Optional[str] = Field(default=None, max_length=255)
+    review_notes: Optional[str] = Field(default=None, max_length=1000)
 
 
 class SpellingAttemptCreate(BaseModel):
@@ -472,6 +491,7 @@ class ContentBulkGenerateRequest(BaseModel):
 class ContentBulkGenerateResult(BaseModel):
     requested_limit: int
     generated: int
+    fallback: int = 0
     cached: int
     failed: int
     remaining: int
@@ -480,6 +500,8 @@ class ContentBulkGenerateResult(BaseModel):
 class ContentBulkStatus(BaseModel):
     total_words: int
     generated: int
+    fallback: int
+    reviewed: int
     pending: int
     failed: int
 
@@ -494,6 +516,9 @@ class BulkGeneratePreview(BaseModel):
     estimated_api_calls: int
     model: str
     voice: Optional[str] = None
+    fallback: int = 0
+    reviewed: int = 0
+    ai_generation_enabled: Optional[bool] = None
 
 
 class SpellingAudioPreloadRequest(BaseModel):

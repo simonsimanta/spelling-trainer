@@ -103,7 +103,7 @@ def test_alembic_round_trip_on_sqlite(tmp_path) -> None:
             text=True,
         )
 
-    run_alembic("upgrade", "head")
+    run_alembic("upgrade", migration.revision)
     with sqlite3.connect(database_path) as connection:
         version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
         assert version == (migration.revision,)
@@ -123,7 +123,7 @@ def test_alembic_round_trip_on_sqlite(tmp_path) -> None:
         }
         assert "ix_spelling_attempts_word_id" not in indexes
 
-    run_alembic("upgrade", "head")
+    run_alembic("upgrade", migration.revision)
     with sqlite3.connect(database_path) as connection:
         version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
         assert version == (migration.revision,)

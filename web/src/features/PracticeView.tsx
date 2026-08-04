@@ -125,7 +125,10 @@ export function PracticeView({
   async function playCurrentAudio() {
     if (!current) return;
     try {
-      await playAudio(isDictation ? current.prompt_text : current.term);
+      await playAudio(isDictation ? current.prompt_text : current.term, {
+        wordId: current.word_id ?? undefined,
+        mode: isDictation ? "dictation" : "word"
+      });
       setAudioError(null);
     } catch (err) {
       setAudioError(err instanceof Error ? err.message : "Unable to play audio");

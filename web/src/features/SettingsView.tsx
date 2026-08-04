@@ -399,6 +399,7 @@ function BulkCard({
   onPreview: () => void;
 }) {
   const pending = status?.pending ?? 0;
+  const ready = (status?.generated ?? 0) + (status?.fallback ?? 0) + (status?.reviewed ?? 0);
   const loaded = oxfordStatus?.loaded_words ?? status?.total_words ?? 0;
   const target = oxfordStatus?.target_words ?? 5000;
   let buttonLabel = cardTitle.includes("Audio") ? "Preview Audio Batch" : "Preview Content Batch";
@@ -420,13 +421,18 @@ function BulkCard({
         </div>
       ) : null}
       <div className="bulk-status-row">
-        <span><b>{status?.generated ?? 0} / {loaded}</b> generated / loaded</span>
+        <span><b>{ready} / {loaded}</b> ready / loaded</span>
         <span><b>{pending}</b> pending among loaded</span>
         <span><b>{status?.failed ?? 0}</b> failed</span>
       </div>
+      {!variant && ((status?.fallback ?? 0) > 0 || (status?.reviewed ?? 0) > 0) ? (
+        <div className="bulk-result">
+          {status?.fallback ?? 0} deterministic fallback, {status?.reviewed ?? 0} manually reviewed.
+        </div>
+      ) : null}
       {result ? (
         <div className={result.failed ? "bulk-result warn" : "bulk-result"}>
-          Last run: {result.generated} generated, {result.cached} cached, {result.failed} failed, {result.remaining} remaining.
+          Last run: {result.generated} generated, {result.fallback ?? 0} fallback, {result.cached} cached, {result.failed} failed, {result.remaining} remaining.
         </div>
       ) : null}
       <button disabled={running || !status || pending === 0} onClick={onPreview}>
@@ -461,11 +467,16 @@ function BulkPreviewPanel({
           <button className="secondary" disabled={running} onClick={onCancel}>Cancel</button>
         </div>
         <p>
-          This will process up to {preview.will_process} words from a batch size of {preview.limit}. This may use OpenAI API quota.
+          This will process up to {preview.will_process} words from a batch size of {preview.limit}.
+          {kind === "content" && preview.ai_generation_enabled === false
+            ? " AI generation is disabled, so deterministic fallback content will be saved without API calls."
+            : " This may use OpenAI API quota."}
         </p>
         <div className="preview-grid">
           <span><b>{preview.total_words}</b>Total words</span>
           <span><b>{preview.generated}</b>Generated</span>
+          {kind === "content" ? <span><b>{preview.fallback ?? 0}</b>Fallback</span> : null}
+          {kind === "content" ? <span><b>{preview.reviewed ?? 0}</b>Reviewed</span> : null}
           <span><b>{preview.pending}</b>Pending</span>
           <span><b>{preview.failed}</b>Failed</span>
           <span><b>{preview.will_process}</b>Will process</span>

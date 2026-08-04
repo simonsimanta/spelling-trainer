@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.backend import readiness, repository, schemas
+from app.backend import models, readiness, repository, schemas
 from app.backend.db import get_db
 from app.backend.spelling import analytics, attempts, audio, oxford, sessions, suggestions, words
 
@@ -190,6 +190,19 @@ def get_spelling_word_content(word_id: int, db: Session = Depends(get_db)) -> sc
         raise HTTPException(status_code=404, detail=str(err))
 
 
+@app.patch("/spelling/word-content/{word_id}", response_model=schemas.SpellingWordContentRead)
+def patch_spelling_word_content(
+    word_id: int,
+    payload: schemas.SpellingWordContentOverride,
+    db: Session = Depends(get_db),
+) -> schemas.SpellingWordContentRead:
+    try:
+        return repository.override_word_content(db, word_id, payload)
+    except ValueError as err:
+        status_code = 404 if str(err) == "Word not found" else 400
+        raise HTTPException(status_code=status_code, detail=str(err))
+
+
 @app.post("/spelling/content/bulk-generate", response_model=schemas.ContentBulkGenerateResult)
 def post_spelling_content_bulk_generate(
     payload: schemas.ContentBulkGenerateRequest,
@@ -343,13 +356,21 @@ def get_spelling_audio(
     text: str = Query(min_length=1, max_length=200),
     voice: Optional[str] = Query(default=None, min_length=1, max_length=40),
     model: Optional[str] = Query(default=None, min_length=1, max_length=80),
+    word_id: Optional[int] = Query(default=None, ge=1),
+    mode: str = Query(default="word", pattern="^(word|dictation)$"),
+    force: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> Response:
     settings = repository.get_settings(db)
+    word = db.get(models.SpellingWord, word_id) if word_id is not None else None
+    if word_id is not None and word is None:
+        raise HTTPException(status_code=404, detail="Word not found")
     return audio.get_audio_response(
         text,
         voice=voice or settings.tts_voice,
         model=model or settings.tts_model,
+        instructions=audio.pronunciation_instructions(text, word, mode),
+        force=force,
     )
 
 

@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 db_fd, db_path = tempfile.mkstemp(suffix=".db")
 os.close(db_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
+os.environ["OPENAI_API_KEY"] = ""
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
@@ -733,7 +734,12 @@ def test_bulk_generation_endpoints_return_result_shapes(monkeypatch, tmp_path) -
     assert {"requested_limit", "generated", "cached", "failed", "remaining"}.issubset(content_payload.keys())
     assert content_payload["requested_limit"] == 2
 
-    def fake_audio(_: str, voice: str = "alloy", model: str = "gpt-4o-mini-tts") -> bytes:
+    def fake_audio(
+        _: str,
+        voice: str = "alloy",
+        model: str = "gpt-4o-mini-tts",
+        instructions: str = "",
+    ) -> bytes:
         return b"fake-mp3"
 
     monkeypatch.setattr(audio, "audio_cache_dir", lambda: tmp_path)
@@ -1399,14 +1405,80 @@ def test_content_and_audio_bulk_generation(monkeypatch, tmp_path) -> None:
 
     content = client.post("/spelling/content/bulk-generate", json={"limit": 2})
     assert content.status_code == 200
-    assert content.json()["generated"] >= 1
-    assert client.get("/spelling/content/bulk-status").json()["generated"] >= 1
+    assert content.json()["generated"] + content.json()["fallback"] >= 1
+    content_status = client.get("/spelling/content/bulk-status").json()
+    assert content_status["generated"] + content_status["fallback"] >= 1
 
     monkeypatch.setattr(audio, "audio_cache_dir", lambda: tmp_path)
-    monkeypatch.setattr(audio, "generate_tts_audio", lambda text, voice="alloy", model="gpt-4o-mini-tts": b"bulk-mp3")
+    monkeypatch.setattr(
+        audio,
+        "generate_tts_audio",
+        lambda text, voice="alloy", model="gpt-4o-mini-tts", instructions="": b"bulk-mp3",
+    )
     result = client.post("/spelling/audio/bulk-generate", json={"limit": 2})
     assert result.status_code == 200
     assert result.json()["generated"] >= 1
+
+
+def test_disabled_ai_fallback_and_manual_content_review(monkeypatch, tmp_path) -> None:
+    _seed_core_words()
+    client = _client()
+    settings = client.patch("/settings", json={"ai_generation_enabled": False})
+    assert settings.status_code == 200
+    word_id = client.get("/spelling/words").json()[0]["id"]
+
+    content_response = client.get(f"/spelling/word-content/{word_id}")
+    assert content_response.status_code == 200
+    content = content_response.json()
+    assert content["status"] == "fallback"
+    assert content["generation_source"] == "fallback"
+    assert "disabled" in content["fallback_reason"].lower()
+
+    preview = client.get("/spelling/content/bulk-preview", params={"limit": 10}).json()
+    assert preview["estimated_api_calls"] == 0
+    assert preview["ai_generation_enabled"] is False
+    bulk = client.post("/spelling/content/bulk-generate", json={"limit": 1}).json()
+    assert bulk["fallback"] == 1
+    assert bulk["generated"] + bulk["fallback"] + bulk["cached"] + bulk["failed"] == 1
+
+    term = content["term"]
+    reviewed = client.patch(
+        f"/spelling/word-content/{word_id}",
+        json={
+            "meaning": "A reviewed meaning.",
+            "ipa": "/reviewed/ or /alternate/",
+            "part_of_speech": "noun",
+            "examples": [f"{term.capitalize()} begins this example."],
+            "word_family": [{"term": term, "label": "noun"}],
+            "chunked_form": "-".join(term),
+            "phonetic_hint": "Stress the first syllable",
+            "review_notes": "Checked against a learner dictionary.",
+        },
+    )
+    assert reviewed.status_code == 200
+    assert reviewed.json()["status"] == "reviewed"
+    assert reviewed.json()["generation_source"] == "manual"
+
+    invalid = client.patch(
+        f"/spelling/word-content/{word_id}",
+        json={"examples": ["This sentence omits the requested spelling term."]},
+    )
+    assert invalid.status_code == 400
+
+    generated = []
+
+    def fake_audio(text: str, voice: str, model: str, instructions: str = "") -> bytes:
+        generated.append((text, instructions))
+        return b"reviewed-audio"
+
+    monkeypatch.setattr(audio, "audio_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(audio, "generate_tts_audio", fake_audio)
+    playback = client.get(
+        "/spelling/audio",
+        params={"text": term, "word_id": word_id, "force": True},
+    )
+    assert playback.status_code == 200
+    assert "Stress the first syllable" in generated[0][1]
     status = client.get("/spelling/audio/bulk-status").json()
     assert status["generated"] >= 1
     assert status["voice"] == "alloy"
@@ -1418,7 +1490,11 @@ def test_cached_audio_endpoint(monkeypatch, tmp_path) -> None:
     client = _client()
     cache_file = tmp_path / "cached.mp3"
     cache_file.write_bytes(b"fake-mp3")
-    monkeypatch.setattr(audio, "audio_cache_path", lambda text, voice, model: cache_file)
+    monkeypatch.setattr(
+        audio,
+        "audio_cache_path",
+        lambda text, voice, model, instructions="": cache_file,
+    )
 
     audio_response = client.get("/spelling/audio", params={"text": "definitely"})
     assert audio_response.status_code == 200
@@ -1431,7 +1507,7 @@ def test_audio_cache_and_on_demand_generation_are_variant_aware(monkeypatch, tmp
     client = _client()
     generated_variants = []
 
-    def fake_audio(text: str, voice: str, model: str) -> bytes:
+    def fake_audio(text: str, voice: str, model: str, instructions: str = "") -> bytes:
         generated_variants.append((text, voice, model))
         return f"{voice}:{model}".encode()
 
@@ -1498,7 +1574,7 @@ def test_bulk_audio_status_and_legacy_manifests_are_variant_specific(monkeypatch
 
     generated_variants = []
 
-    def fake_audio(text: str, voice: str, model: str) -> bytes:
+    def fake_audio(text: str, voice: str, model: str, instructions: str = "") -> bytes:
         generated_variants.append((text, voice, model))
         return b"fresh-variant"
 
@@ -1571,10 +1647,16 @@ def test_tts_request_uses_selected_variant_and_mp3_response_format(monkeypatch) 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(audio.requests, "post", fake_post)
 
-    result = audio.generate_tts_audio("Spell clearly.", voice="Coral", model="gpt-4o-mini-tts")
+    result = audio.generate_tts_audio(
+        "Spell clearly.",
+        voice="Coral",
+        model="gpt-4o-mini-tts",
+        instructions="Read this once at a measured learner pace.",
+    )
 
     assert result == b"generated-audio"
     assert captured["json"]["voice"] == "coral"
     assert captured["json"]["model"] == "gpt-4o-mini-tts"
     assert captured["json"]["response_format"] == "mp3"
+    assert captured["json"]["instructions"] == "Read this once at a measured learner pace."
     assert "format" not in captured["json"]

@@ -38,6 +38,9 @@ test("first-run dashboard exposes Diagnostic and starts a diagnostic session", a
 });
 
 test("diagnostic shows progress while audio and spelling checks are prepared", async ({ page }) => {
+  let dashboardRequests = 0;
+  let attemptCompleted = false;
+  let dashboardRequestsBeforeCheck = 0;
   let releaseSession: () => void = () => undefined;
   let markSessionRequested: () => void = () => undefined;
   const sessionGate = new Promise<void>((resolve) => { releaseSession = resolve; });
@@ -58,7 +61,17 @@ test("diagnostic shows progress while audio and spelling checks are prepared", a
     Object.defineProperty(window, "Audio", { configurable: true, value: MockAudio });
   });
   await page.route("**/dashboard", async (route) => {
-    await route.fulfill({ json: firstRunDashboard });
+    dashboardRequests += 1;
+    await route.fulfill({
+      headers: { "Cache-Control": "public, max-age=3600" },
+      json: {
+        ...firstRunDashboard,
+        profile: {
+          ...firstRunDashboard.profile,
+          points: attemptCompleted ? 10 : 0
+        }
+      }
+    });
   });
   await page.route("**/spelling/sessions*", async (route) => {
     if (route.request().method() !== "POST") {
@@ -81,6 +94,7 @@ test("diagnostic shows progress while audio and spelling checks are prepared", a
     }
     markAttemptRequested();
     await attemptGate;
+    attemptCompleted = true;
     await route.fulfill({
       json: {
         attempt_id: 1,
@@ -131,12 +145,15 @@ test("diagnostic shows progress while audio and spelling checks are prepared", a
   await expect(page.getByRole("button", { name: "Hear Again" })).toBeEnabled();
 
   await page.getByPlaceholder("Type the spelling here...").fill("definitely");
+  dashboardRequestsBeforeCheck = dashboardRequests;
   const checkAction = page.getByRole("button", { name: "Check Answer" }).click();
   await attemptRequested;
   await expect(page.getByRole("button", { name: "Checking..." })).toBeDisabled();
   releaseAttempt();
   await checkAction;
   await expect(page.getByText("Correct. +10 points")).toBeVisible();
+  await expect(page.getByText("Score: 10")).toBeVisible();
+  expect(dashboardRequests).toBeGreaterThan(dashboardRequestsBeforeCheck);
 });
 
 test("diagnostic start failures keep the learner in a recoverable state", async ({ page }) => {

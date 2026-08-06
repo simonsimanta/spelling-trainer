@@ -27,6 +27,7 @@ import type {
 
 import { title } from "../utils/format";
 import { practiceEmptyState } from "./guidance";
+import { DictationLibrary } from "./DictationLibrary";
 
 
 export function PracticeView({
@@ -157,6 +158,7 @@ export function PracticeView({
             {isDictation ? "Start Dictation" : isDiagnostic ? "Start Diagnostic" : "Start Practice"} <ChevronRight size={18} />
           </button>
         </div>
+        {isDictation ? <DictationLibrary /> : null}
       </section>
     );
   }

@@ -202,6 +202,61 @@ class SpellingWordContentOverride(BaseModel):
     review_notes: Optional[str] = Field(default=None, max_length=1000)
 
 
+class DictationTextTargetRead(BaseModel):
+    word_id: Optional[int] = None
+    term: str
+    order_index: int
+
+
+class DictationTextRead(BaseModel):
+    id: int
+    title: str
+    content: str
+    source_type: Literal["curated", "personal", "ai_adapted"]
+    level: Literal["sentence", "passage", "paragraph"]
+    locale: str
+    status: Literal["reviewed", "needs_adaptation", "archived"]
+    word_count: int
+    sentence_count: int
+    quality_warnings: List[str] = Field(default_factory=list)
+    allow_ai_adaptation: bool
+    adapted_from_id: Optional[int] = None
+    targets: List[DictationTextTargetRead] = Field(default_factory=list)
+    use_count: int = 0
+    last_used_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class DictationTextListOut(BaseModel):
+    items: List[DictationTextRead] = Field(default_factory=list)
+    total: int
+    counts: Dict[str, int] = Field(default_factory=dict)
+
+
+class DictationTextCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=1, max_length=10000)
+    level: Literal["auto", "sentence", "passage", "paragraph"] = "auto"
+    target_terms: List[str] = Field(default_factory=list, max_length=6)
+    allow_ai_adaptation: bool = True
+
+
+class DictationTextAction(BaseModel):
+    action: Literal["archive", "restore"]
+
+
+class DictationTextAdaptRequest(BaseModel):
+    level: Literal["sentence", "passage", "paragraph"]
+    target_terms: List[str] = Field(default_factory=list, max_length=6)
+
+
+class DictationTextAdaptResult(BaseModel):
+    text: DictationTextRead
+    cached: bool = False
+    used_fallback: bool = False
+    fallback_reason: Optional[str] = None
+
+
 class SpellingAttemptCreate(BaseModel):
     word_id: int
     attempt_text: str = Field(min_length=1, max_length=120)

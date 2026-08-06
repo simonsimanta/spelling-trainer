@@ -137,6 +137,7 @@ class SpellingWord(Base):
     audio_manifests = relationship("SpellingAudioManifest", back_populates="word", cascade="all, delete")
     feedback_cache_entries = relationship("SpellingFeedbackCache", back_populates="word", cascade="all, delete")
     content_cache = relationship("SpellingWordContent", back_populates="word", cascade="all, delete", uselist=False)
+    dictation_targets = relationship("SpellingDictationTextTarget", back_populates="word")
 
 
 class SpellingWordContent(Base):
@@ -175,6 +176,66 @@ class SpellingWordSource(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     word = relationship("SpellingWord", back_populates="sources")
+
+
+class SpellingDictationText(Base):
+    __tablename__ = "spelling_dictation_texts"
+    __table_args__ = (
+        UniqueConstraint("content_hash", name="uq_spelling_dictation_text_content_hash"),
+        UniqueConstraint("adaptation_key", name="uq_spelling_dictation_text_adaptation_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    level: Mapped[str] = mapped_column(String(20), nullable=False)
+    locale: Mapped[str] = mapped_column(String(10), default="en-GB", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="reviewed", nullable=False)
+    word_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    sentence_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    quality_warnings: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    allow_ai_adaptation: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    adapted_from_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_dictation_texts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    adaptation_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    ai_model: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    use_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    targets = relationship(
+        "SpellingDictationTextTarget",
+        back_populates="text",
+        cascade="all, delete-orphan",
+        order_by="SpellingDictationTextTarget.order_index",
+    )
+
+
+class SpellingDictationTextTarget(Base):
+    __tablename__ = "spelling_dictation_text_targets"
+    __table_args__ = (
+        UniqueConstraint("text_id", "target_term", name="uq_spelling_dictation_target_term"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    text_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_dictation_texts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    word_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_words.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    target_term: Mapped[str] = mapped_column(String(120), nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    text = relationship("SpellingDictationText", back_populates="targets")
+    word = relationship("SpellingWord", back_populates="dictation_targets")
 
 
 class SpellingReview(Base):

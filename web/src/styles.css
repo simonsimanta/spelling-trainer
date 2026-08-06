@@ -1331,6 +1331,170 @@ p {
   min-width: 220px;
 }
 
+.dictation-library {
+  margin-top: 28px;
+  border-top: 1px solid #dce5f2;
+  padding-top: 26px;
+}
+
+.dictation-library .section-head {
+  margin-bottom: 18px;
+}
+
+.dictation-library h2,
+.dictation-library h3 {
+  letter-spacing: 0;
+}
+
+.dictation-import {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.35fr);
+  gap: 14px;
+  padding: 20px;
+  margin-bottom: 18px;
+  border: 1px solid #dce5f2;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.dictation-import label {
+  display: grid;
+  gap: 7px;
+  color: #425575;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dictation-import-wide {
+  grid-column: 1 / -1;
+}
+
+.dictation-import button {
+  justify-self: start;
+}
+
+.dictation-level-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  margin-bottom: 12px;
+}
+
+.dictation-level-tabs button {
+  flex: 0 0 auto;
+}
+
+.dictation-level-tabs button.active {
+  background: #0f766e;
+}
+
+.dictation-level-tabs button span {
+  min-width: 22px;
+  min-height: 22px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  padding: 0 6px;
+  background: rgba(255, 255, 255, 0.2);
+  font-size: 12px;
+}
+
+.dictation-level-tabs button.secondary span {
+  background: #edf2f7;
+}
+
+.dictation-text-list {
+  display: grid;
+  gap: 10px;
+}
+
+.dictation-text-list article {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 14px;
+  border: 1px solid #dce5f2;
+  border-radius: 8px;
+  padding: 16px;
+  background: #ffffff;
+}
+
+.dictation-text-list article.archived {
+  opacity: 0.65;
+  background: #f8fafc;
+}
+
+.dictation-text-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #0f766e;
+  background: #e7f6f3;
+}
+
+.dictation-text-copy {
+  min-width: 0;
+}
+
+.dictation-text-copy > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.dictation-text-copy h3 {
+  margin-bottom: 5px;
+  color: #132445;
+  font-size: 16px;
+}
+
+.dictation-text-copy span,
+.dictation-text-copy p,
+.dictation-text-copy small {
+  color: #66758e;
+  font-size: 13px;
+}
+
+.dictation-text-copy p {
+  margin-bottom: 0;
+}
+
+.dictation-text-copy blockquote {
+  margin: 10px 0 0;
+  color: #314467;
+  font-size: 13px;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.dictation-text-copy small {
+  display: block;
+  margin-top: 8px;
+  color: #a14b12;
+}
+
+.dictation-text-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.danger-icon {
+  color: #b42318;
+}
+
+.empty-copy {
+  color: #66758e;
+  padding: 20px 0;
+}
+
 .exercise-card {
   text-align: center;
   display: grid;
@@ -2579,6 +2743,19 @@ p {
   .practice-audio-stage {
     grid-template-columns: 1fr;
     gap: 10px;
+  }
+
+  .dictation-import,
+  .dictation-text-list article {
+    grid-template-columns: 1fr;
+  }
+
+  .dictation-import-wide {
+    grid-column: auto;
+  }
+
+  .dictation-text-actions {
+    justify-content: flex-start;
   }
 
   .practice-audio-stage .waveform:first-child {

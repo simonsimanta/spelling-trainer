@@ -45,6 +45,13 @@ export function patchJson<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
+export async function deleteJson(path: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}${path}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+}
+
 export async function playAudio(
   text: string,
   variant?: {

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.backend import models, readiness, repository, schemas
 from app.backend.db import get_db
-from app.backend.spelling import analytics, attempts, audio, oxford, sessions, suggestions, words
+from app.backend.spelling import analytics, attempts, audio, dictation_texts, oxford, sessions, suggestions, words
 
 
 logger = logging.getLogger(__name__)
@@ -222,6 +222,76 @@ def get_spelling_content_bulk_preview(
 @app.get("/spelling/content/bulk-status", response_model=schemas.ContentBulkStatus)
 def get_spelling_content_bulk_status(db: Session = Depends(get_db)) -> schemas.ContentBulkStatus:
     return repository.content_bulk_status(db)
+
+
+@app.get("/spelling/dictation/texts", response_model=schemas.DictationTextListOut)
+def get_dictation_texts(
+    level: Optional[str] = Query(default=None, pattern="^(sentence|passage|paragraph)$"),
+    source_type: Optional[str] = Query(default=None, pattern="^(curated|personal|ai_adapted)$"),
+    status: str = Query(default="active", pattern="^(active|reviewed|needs_adaptation|archived|all)$"),
+    db: Session = Depends(get_db),
+) -> schemas.DictationTextListOut:
+    return dictation_texts.list_dictation_texts(
+        db,
+        level=level,
+        source_type=source_type,
+        status=status,
+    )
+
+
+@app.post("/spelling/dictation/texts", response_model=schemas.DictationTextRead)
+def post_dictation_text(
+    payload: schemas.DictationTextCreate,
+    db: Session = Depends(get_db),
+) -> schemas.DictationTextRead:
+    try:
+        return dictation_texts.create_personal_text(db, payload)
+    except ValueError as error:
+        status_code = 409 if "already in the library" in str(error) else 400
+        raise HTTPException(status_code=status_code, detail=str(error))
+
+
+@app.patch("/spelling/dictation/texts/{text_id}", response_model=schemas.DictationTextRead)
+def patch_dictation_text(
+    text_id: int,
+    payload: schemas.DictationTextAction,
+    db: Session = Depends(get_db),
+) -> schemas.DictationTextRead:
+    try:
+        return dictation_texts.update_dictation_text(db, text_id, payload)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+
+@app.delete("/spelling/dictation/texts/{text_id}", status_code=204)
+def delete_dictation_text(text_id: int, db: Session = Depends(get_db)) -> Response:
+    try:
+        dictation_texts.delete_dictation_text(db, text_id)
+    except PermissionError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    return Response(status_code=204)
+
+
+@app.post(
+    "/spelling/dictation/texts/{text_id}/adapt",
+    response_model=schemas.DictationTextAdaptResult,
+)
+def post_dictation_text_adaptation(
+    text_id: int,
+    payload: schemas.DictationTextAdaptRequest,
+    db: Session = Depends(get_db),
+) -> schemas.DictationTextAdaptResult:
+    try:
+        return dictation_texts.adapt_dictation_text(db, text_id, payload)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except ValueError as error:
+        status_code = 404 if "not found" in str(error).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(error))
 
 
 @app.get("/spelling/exploration/next", response_model=schemas.ExplorationNextOut)

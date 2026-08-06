@@ -229,6 +229,44 @@ export type Exploration = {
   total_words: number;
 };
 
+export type DictationTextTarget = {
+  word_id?: number | null;
+  term: string;
+  order_index: number;
+};
+
+export type DictationText = {
+  id: number;
+  title: string;
+  content: string;
+  source_type: "curated" | "personal" | "ai_adapted";
+  level: "sentence" | "passage" | "paragraph";
+  locale: string;
+  status: "reviewed" | "needs_adaptation" | "archived";
+  word_count: number;
+  sentence_count: number;
+  quality_warnings: string[];
+  allow_ai_adaptation: boolean;
+  adapted_from_id?: number | null;
+  targets: DictationTextTarget[];
+  use_count: number;
+  last_used_at?: string | null;
+  created_at: string;
+};
+
+export type DictationTextList = {
+  items: DictationText[];
+  total: number;
+  counts: Record<string, number>;
+};
+
+export type DictationAdaptationResult = {
+  text: DictationText;
+  cached: boolean;
+  used_fallback: boolean;
+  fallback_reason?: string | null;
+};
+
 export type SessionItem = {
   session_item_id: number;
   word_id?: number | null;

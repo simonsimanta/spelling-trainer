@@ -207,8 +207,8 @@ export function DictationLibrary() {
                 <h3>{item.title}</h3>
                 <span>{sourceLabel(item)}</span>
               </div>
-              <p>{item.word_count} words / {item.sentence_count} {item.sentence_count === 1 ? "sentence" : "sentences"} / {item.targets.length} targets</p>
-              {item.source_type === "personal" ? <blockquote>{item.content}</blockquote> : null}
+              <p>{item.word_count} words / {item.sentence_count} {item.sentence_count === 1 ? "sentence" : "sentences"} / {item.target_count} targets</p>
+              {item.source_type === "personal" && item.content ? <blockquote>{item.content}</blockquote> : null}
               {item.quality_warnings.length ? <small>{item.quality_warnings.join(" ")}</small> : null}
             </div>
             <div className="dictation-text-actions">

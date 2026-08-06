@@ -3,6 +3,8 @@ import type { Page } from "@playwright/test";
 
 import {
   dashboardWithStats,
+  dictationProgress,
+  dictationResult,
   dictationSession,
   firstRunDashboard,
   oxfordLoadStatus,
@@ -26,6 +28,7 @@ function captureBrowserErrors(page: Page): string[] {
 async function mockAppShell(page: Page, dashboard = firstRunDashboard) {
   await page.route("**/readiness", (route) => route.fulfill({ json: readyEnvironment }));
   await page.route("**/dashboard", (route) => route.fulfill({ json: dashboard }));
+  await page.route("**/spelling/dictation/progress", (route) => route.fulfill({ json: dictationProgress }));
   await page.route("**/spelling/dictation/texts**", (route) => {
     const personalText = {
       id: 16,
@@ -41,6 +44,7 @@ async function mockAppShell(page: Page, dashboard = firstRunDashboard) {
       allow_ai_adaptation: true,
       adapted_from_id: null,
       targets: [{ word_id: null, term: "instrument", order_index: 0 }],
+      target_count: 1,
       use_count: 0,
       last_used_at: null,
       created_at: "2026-08-06T12:00:00Z"
@@ -56,10 +60,11 @@ async function mockAppShell(page: Page, dashboard = firstRunDashboard) {
             ...personalText,
             id: 1,
             title: "Posting the letter",
-            content: "I will definitely check the address before posting the letter.",
+            content: null,
             source_type: "curated",
             allow_ai_adaptation: false,
-            targets: [{ word_id: 1, term: "definitely", order_index: 0 }]
+            targets: [],
+            target_count: 1
           }
         ],
         total: 1,
@@ -123,30 +128,33 @@ test("Practice covers empty and populated queues with deterministic sessions", a
   expect(browserErrors).toEqual([]);
 });
 
-test("Dictation covers empty and populated queues with deterministic sessions", async ({ page }) => {
+test("Adaptive dictation hides the answer until layered grading is returned", async ({ page }) => {
   const browserErrors = captureBrowserErrors(page);
-  let useEmptySession = true;
   const dashboard = dashboardWithStats({ diagnostic_ready_words: 19, dictation_ready_words: 1 });
   await mockAppShell(page, dashboard);
   await page.route("**/spelling/sessions", (route) => {
-    route.fulfill({
-      json: useEmptySession
-        ? { ...dictationSession, total_items: 0, items: [] }
-        : dictationSession
-    });
+    route.fulfill({ json: dictationSession });
+  });
+  await page.route("**/spelling/dictation/submissions", (route) => {
+    route.fulfill({ json: dictationResult });
   });
 
   await page.goto("/");
   await page.getByRole("navigation").getByRole("button", { name: "Dictation" }).click();
-  await page.getByRole("button", { name: "Start Dictation" }).click();
-  await expect(page.getByRole("heading", { name: "No dictation words yet" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Sentence level" })).toBeVisible();
+  await page.getByRole("button", { name: "Start sentence" }).click();
+  await expect(page.getByRole("heading", { name: "Text 1 of 1" })).toBeVisible();
+  await expect(page.getByText(dictationResult.expected_text)).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Back" }).click();
-  useEmptySession = false;
-  await page.getByRole("button", { name: "Start Dictation" }).click();
-  await expect(page.getByRole("heading", { name: "Sentence Dictation" })).toBeVisible();
-  await expect(page.getByText("1 / 1")).toBeVisible();
-  await expect(page.getByPlaceholder("Type the sentence here...")).toBeVisible();
+  await page.getByPlaceholder("Type everything you hear...").fill(dictationResult.attempt_text);
+  await page.getByRole("button", { name: "Check dictation" }).click();
+
+  const result = page.getByLabel("Dictation result");
+  await expect(result).toContainText("Target spelling");
+  await expect(result).toContainText("Words");
+  await expect(result).toContainText("Capitalisation");
+  await expect(result).toContainText("Punctuation");
+  await expect(result).toContainText(dictationResult.expected_text);
   expect(browserErrors).toEqual([]);
 });
 

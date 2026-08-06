@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.backend import models, schemas
-from app.backend.spelling import dictation_texts, error_analysis
+from app.backend.spelling import dictation_grading, dictation_texts, error_analysis
 from app.backend.spelling.content_quality import (
     ContentGenerationResult,
     contains_target,
@@ -53,6 +53,8 @@ STABLE_AUDIT_DAYS = 30
 STABLE_MASTERY_STATES = {"stable_known", "mastered"}
 DIAGNOSTIC_PRIORITY_BOOST = 1.0
 RECENT_MISS_WINDOW_DAYS = 14
+DICTATION_LEVELS = ["sentence", "passage", "paragraph"]
+DICTATION_SESSION_ITEMS = {"sentence": 5, "passage": 3, "paragraph": 2}
 
 COMMON_CONFUSION_WORDS = [
     "definitely",
@@ -2015,7 +2017,129 @@ def _prompt_for(word: models.SpellingWord, item_type: models.SpellingSessionItem
     return "Choose or type the correct spelling of the word."
 
 
+def _ensure_dictation_progress(db: Session) -> models.SpellingDictationProgress:
+    progress = db.get(models.SpellingDictationProgress, 1)
+    if progress:
+        return progress
+    now = datetime.utcnow()
+    progress = models.SpellingDictationProgress(
+        id=1,
+        current_level="sentence",
+        level_started_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(progress)
+    db.flush()
+    return progress
+
+
+def get_dictation_progress(db: Session) -> schemas.DictationProgressOut:
+    progress = _ensure_dictation_progress(db)
+    completed = db.scalar(
+        select(func.count(models.SpellingSession.id)).where(
+            models.SpellingSession.session_type == models.SpellingSessionType.dictation,
+            models.SpellingSession.dictation_level == progress.current_level,
+            models.SpellingSession.created_at >= progress.level_started_at,
+            models.SpellingSession.is_completed.is_(True),
+            models.SpellingSession.dictation_target_accuracy.is_not(None),
+        )
+    ) or 0
+    db.commit()
+    return schemas.DictationProgressOut(
+        current_level=progress.current_level,
+        previous_level=progress.previous_level,
+        completed_sessions_at_level=int(completed),
+        updated_at=progress.updated_at,
+    )
+
+
+def _dictation_item_type(level: str) -> models.SpellingSessionItemType:
+    return {
+        "sentence": models.SpellingSessionItemType.sentence_dictation,
+        "passage": models.SpellingSessionItemType.passage_dictation,
+        "paragraph": models.SpellingSessionItemType.paragraph_dictation,
+    }[level]
+
+
+def create_adaptive_dictation_session(
+    db: Session,
+    payload: schemas.SpellingSessionCreate,
+) -> schemas.SpellingSessionOut:
+    progress = _ensure_dictation_progress(db)
+    level = progress.current_level
+    texts = list(
+        db.scalars(
+            select(models.SpellingDictationText).where(
+                models.SpellingDictationText.level == level,
+                models.SpellingDictationText.status == "reviewed",
+            )
+        ).unique().all()
+    )
+    if not texts:
+        dictation_texts.seed_dictation_texts(db)
+        texts = list(
+            db.scalars(
+                select(models.SpellingDictationText).where(
+                    models.SpellingDictationText.level == level,
+                    models.SpellingDictationText.status == "reviewed",
+                )
+            ).unique().all()
+        )
+    texts.sort(key=lambda text: (text.last_used_at or datetime.min, text.use_count, text.id))
+    desired = min(payload.target_size, DICTATION_SESSION_ITEMS[level])
+    selected = texts[:desired]
+    session = models.SpellingSession(
+        session_type=models.SpellingSessionType.dictation,
+        dictation_level=level,
+        total_items=len(selected),
+        sentence_items=len(selected),
+    )
+    db.add(session)
+    db.flush()
+    for index, text in enumerate(selected):
+        source_label = {
+            "curated": "reviewed built-in",
+            "personal": "personal text",
+            "ai_adapted": "AI adaptation",
+        }.get(text.source_type, "dictation library")
+        db.add(
+            models.SpellingSessionItem(
+                session_id=session.id,
+                dictation_text_id=text.id,
+                prompt_text="Listen to the complete text and type what you hear.",
+                item_type=_dictation_item_type(level),
+                source_reason=source_label,
+                selection_score=float(len(text.targets)),
+                score_breakdown={"target_count": float(len(text.targets))},
+                order_index=index,
+            )
+        )
+        dictation_texts.mark_used(db, text)
+    db.commit()
+    return get_spelling_session(db, session.id)  # type: ignore[return-value]
+
+
 def _session_item_to_schema(item: models.SpellingSessionItem) -> schemas.SpellingSessionItemOut:
+    if item.dictation_text_id and item.dictation_text:
+        segments = dictation_grading.split_sentence_segments(item.dictation_text.content)
+        return schemas.SpellingSessionItemOut(
+            session_item_id=item.id,
+            word_id=None,
+            term="Dictation",
+            item_type=item.item_type.value,
+            mode=models.SpellingMode.dictation.value,
+            prompt_text=item.prompt_text,
+            source_reason=item.source_reason,
+            queue_reason=item.source_reason,
+            selection_score=item.selection_score,
+            score_breakdown=dict(item.score_breakdown or {}),
+            status=item.status.value,
+            audio_ready=True,
+            dictation_level=item.dictation_text.level,
+            segment_count=len(segments),
+            audio_url=f"/spelling/dictation/items/{item.id}/audio",
+        )
     term = item.word.term if item.word else item.prompt_text
     mode = item.session.session_type.value if item.session else models.SpellingMode.practice.value
     content = item.word.content_cache if item.word else None
@@ -2051,6 +2175,8 @@ def _session_item_to_schema(item: models.SpellingSessionItem) -> schemas.Spellin
 
 def create_spelling_session(db: Session, payload: schemas.SpellingSessionCreate) -> schemas.SpellingSessionOut:
     session_type = models.SpellingSessionType(payload.session_type)
+    if session_type == models.SpellingSessionType.dictation and not payload.word_ids:
+        return create_adaptive_dictation_session(db, payload)
     session = models.SpellingSession(session_type=session_type)
     db.add(session)
     db.flush()
@@ -2144,6 +2270,7 @@ def get_spelling_session(db: Session, session_id: int) -> Optional[schemas.Spell
         session_type=session.session_type.value,
         total_items=session.total_items,
         completed_items=session.completed_items,
+        dictation_level=session.dictation_level,
         items=[_session_item_to_schema(item) for item in items],
     )
 
@@ -2279,11 +2406,17 @@ def _update_attempt_pattern_stats(
         _upsert_pattern_stats(db, pattern_code, is_correct)
 
 
-def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate) -> schemas.SpellingAttemptResult:
+def submit_spelling_attempt(
+    db: Session,
+    payload: schemas.SpellingAttemptCreate,
+    *,
+    dictation_submission_id: Optional[int] = None,
+    commit: bool = True,
+) -> schemas.SpellingAttemptResult:
     word = db.get(models.SpellingWord, payload.word_id)
     if not word:
         raise ValueError("Word not found")
-    settings = get_settings(db)
+    settings = db.get(models.AppSettings, 1) or get_settings(db)
     review = _ensure_spelling_review(db, word)
     session_item = db.get(models.SpellingSessionItem, payload.session_item_id) if payload.session_item_id else None
 
@@ -2468,6 +2601,7 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
         confidence_score=payload.confidence_score,
         session_id=payload.session_id,
         session_item_id=payload.session_item_id,
+        dictation_submission_id=dictation_submission_id,
     )
     db.add(attempt)
     db.flush()
@@ -2519,7 +2653,10 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
         accuracy=1.0 if correct else 0.0,
     )
     _update_achievements(db)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     db.refresh(attempt)
 
     return schemas.SpellingAttemptResult(
@@ -2556,6 +2693,217 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
         retry_index=retry_index,
         skip_available=skip_available,
         skip_after_retries=FORCED_CORRECTION_SKIP_AFTER,
+    )
+
+
+def _evaluate_dictation_progress(
+    db: Session,
+    session: models.SpellingSession,
+) -> tuple[models.SpellingDictationProgress, bool]:
+    progress = _ensure_dictation_progress(db)
+    if progress.current_level != session.dictation_level:
+        return progress, False
+    if progress.last_evaluated_session_id == session.id:
+        return progress, False
+
+    recent = list(
+        db.scalars(
+            select(models.SpellingSession)
+            .where(
+                models.SpellingSession.session_type == models.SpellingSessionType.dictation,
+                models.SpellingSession.dictation_level == progress.current_level,
+                models.SpellingSession.created_at >= progress.level_started_at,
+                models.SpellingSession.is_completed.is_(True),
+                models.SpellingSession.dictation_target_accuracy.is_not(None),
+                models.SpellingSession.dictation_word_accuracy.is_not(None),
+            )
+            .order_by(models.SpellingSession.id.desc())
+            .limit(3)
+        ).all()
+    )
+    changed = False
+    current_index = DICTATION_LEVELS.index(progress.current_level)
+    if len(recent) >= 3 and current_index < len(DICTATION_LEVELS) - 1:
+        target_average = sum(float(item.dictation_target_accuracy or 0.0) for item in recent[:3]) / 3
+        word_average = sum(float(item.dictation_word_accuracy or 0.0) for item in recent[:3]) / 3
+        if target_average >= 0.85 and word_average >= 0.80:
+            progress.previous_level = progress.current_level
+            progress.current_level = DICTATION_LEVELS[current_index + 1]
+            progress.level_changed_at = datetime.utcnow()
+            progress.level_started_at = progress.level_changed_at
+            changed = True
+    if not changed and len(recent) >= 2 and current_index > 0:
+        last_two_are_low = all(
+            float(item.dictation_target_accuracy or 0.0) < 0.70
+            or float(item.dictation_word_accuracy or 0.0) < 0.65
+            for item in recent[:2]
+        )
+        if last_two_are_low:
+            progress.previous_level = progress.current_level
+            progress.current_level = DICTATION_LEVELS[current_index - 1]
+            progress.level_changed_at = datetime.utcnow()
+            progress.level_started_at = progress.level_changed_at
+            changed = True
+    progress.last_evaluated_session_id = session.id
+    progress.updated_at = datetime.utcnow()
+    return progress, changed
+
+
+def submit_dictation_submission(
+    db: Session,
+    payload: schemas.DictationSubmissionCreate,
+) -> schemas.DictationSubmissionResult:
+    session = db.get(models.SpellingSession, payload.session_id)
+    item = db.get(models.SpellingSessionItem, payload.session_item_id)
+    if not session or session.session_type != models.SpellingSessionType.dictation:
+        raise ValueError("Dictation session not found.")
+    if not item or item.session_id != session.id or not item.dictation_text_id or not item.dictation_text:
+        raise ValueError("Dictation item not found.")
+    if db.scalar(
+        select(models.SpellingDictationSubmission.id).where(
+            models.SpellingDictationSubmission.session_item_id == item.id
+        )
+    ):
+        raise ValueError("Dictation item has already been submitted.")
+
+    text = item.dictation_text
+    text_targets = list(text.targets)
+    target_terms = [target.target_term for target in text_targets]
+    grade = dictation_grading.grade_dictation(text.content, payload.attempt_text, target_terms)
+    submission = models.SpellingDictationSubmission(
+        session_id=session.id,
+        session_item_id=item.id,
+        text_id=text.id,
+        level=text.level,
+        attempt_text=payload.attempt_text.strip(),
+        expected_word_count=grade.expected_word_count,
+        attempt_word_count=grade.attempt_word_count,
+        word_error_rate=grade.word_error_rate,
+        word_accuracy=grade.word_accuracy,
+        target_accuracy=grade.target_accuracy,
+        capitalization_accuracy=grade.capitalization_accuracy,
+        punctuation_accuracy=grade.punctuation_accuracy,
+        omissions=grade.omissions,
+        additions=grade.additions,
+        substitutions=grade.substitutions,
+        replay_count=payload.replay_count,
+    )
+    db.add(submission)
+    db.flush()
+
+    target_schemas: List[schemas.DictationTargetResultRead] = []
+    for text_target, target_grade in zip(text_targets, grade.targets):
+        feeds_practice = bool(target_grade.feeds_practice and text_target.word_id)
+        attempt_id: Optional[int] = None
+        if text_target.word_id and (target_grade.is_correct or feeds_practice):
+            target_attempt = submit_spelling_attempt(
+                db,
+                schemas.SpellingAttemptCreate(
+                    word_id=text_target.word_id,
+                    attempt_text=(target_grade.actual or text_target.target_term),
+                    session_id=session.id,
+                    mode=models.SpellingMode.dictation.value,
+                    input_method="dictation_target",
+                    confidence_score=target_grade.confidence,
+                ),
+                dictation_submission_id=submission.id,
+                commit=False,
+            )
+            attempt_id = target_attempt.attempt_id
+        db.add(
+            models.SpellingDictationTargetResult(
+                submission_id=submission.id,
+                text_target_id=text_target.id,
+                word_id=text_target.word_id,
+                attempt_id=attempt_id,
+                target_term=text_target.target_term,
+                attempt_term=target_grade.actual,
+                is_correct=target_grade.is_correct,
+                error_type=target_grade.error_type,
+                confidence=target_grade.confidence,
+                feeds_practice=feeds_practice,
+                order_index=text_target.order_index,
+            )
+        )
+        target_schemas.append(
+            schemas.DictationTargetResultRead(
+                word_id=text_target.word_id,
+                target=text_target.target_term,
+                actual=target_grade.actual,
+                is_correct=target_grade.is_correct,
+                error_type=target_grade.error_type,
+                confidence=target_grade.confidence,
+                feeds_practice=feeds_practice,
+            )
+        )
+
+    item.status = models.SpellingSessionItemStatus.completed
+    db.flush()
+    session.completed_items = int(
+        db.scalar(
+            select(func.count(models.SpellingSessionItem.id)).where(
+                models.SpellingSessionItem.session_id == session.id,
+                models.SpellingSessionItem.status == models.SpellingSessionItemStatus.completed,
+            )
+        )
+        or 0
+    )
+    session.is_completed = session.completed_items >= session.total_items if session.total_items else False
+    level_changed = False
+    progress = _ensure_dictation_progress(db)
+    if session.is_completed:
+        submissions = list(
+            db.scalars(
+                select(models.SpellingDictationSubmission).where(
+                    models.SpellingDictationSubmission.session_id == session.id
+                )
+            ).all()
+        )
+        session.dictation_submission_count = len(submissions)
+        session.dictation_target_accuracy = round(
+            sum(row.target_accuracy for row in submissions) / max(len(submissions), 1), 4
+        )
+        session.dictation_word_accuracy = round(
+            sum(row.word_accuracy for row in submissions) / max(len(submissions), 1), 4
+        )
+        session.correct_first_try = sum(row.target_accuracy == 1.0 for row in submissions)
+        db.flush()
+        progress, level_changed = _evaluate_dictation_progress(db, session)
+    _update_achievements(db)
+    db.commit()
+    db.refresh(submission)
+    return schemas.DictationSubmissionResult(
+        submission_id=submission.id,
+        session_id=session.id,
+        session_item_id=item.id,
+        level=text.level,
+        expected_text=text.content,
+        attempt_text=submission.attempt_text,
+        sentence_segments=dictation_grading.split_sentence_segments(text.content),
+        word_error_rate=grade.word_error_rate,
+        word_accuracy=grade.word_accuracy,
+        target_accuracy=grade.target_accuracy,
+        capitalization_accuracy=grade.capitalization_accuracy,
+        punctuation_accuracy=grade.punctuation_accuracy,
+        omissions=grade.omissions,
+        additions=grade.additions,
+        substitutions=grade.substitutions,
+        replay_count=payload.replay_count,
+        word_operations=[
+            schemas.DictationWordOperationRead(
+                operation=operation.operation,
+                expected=operation.expected,
+                actual=operation.actual,
+                expected_index=operation.expected_index,
+                actual_index=operation.actual_index,
+                confidence=operation.confidence,
+            )
+            for operation in grade.operations
+        ],
+        targets=target_schemas,
+        session_complete=session.is_completed,
+        current_level=progress.current_level,
+        level_changed=level_changed,
     )
 
 
@@ -2837,6 +3185,20 @@ def get_spelling_modes_overview(db: Session) -> schemas.SpellingModesOverviewOut
     return schemas.SpellingModesOverviewOut(modes=metrics)
 
 
+def _dictation_ready_text_count(db: Session) -> int:
+    progress = db.get(models.SpellingDictationProgress, 1)
+    level = progress.current_level if progress else "sentence"
+    return int(
+        db.scalar(
+            select(func.count(models.SpellingDictationText.id)).where(
+                models.SpellingDictationText.level == level,
+                models.SpellingDictationText.status == "reviewed",
+            )
+        )
+        or 0
+    )
+
+
 def get_spelling_daily_plan(db: Session) -> schemas.SpellingDailyPlanOut:
     today = date.today()
     review_candidate = _actionable_review_filter(today)
@@ -2866,11 +3228,7 @@ def get_spelling_daily_plan(db: Session) -> schemas.SpellingDailyPlanOut:
         .where(*_active_learning_word_filter())
         .where(or_(models.SpellingWord.introduced_at.is_(None), models.SpellingWord.mastery_state == "new"))
     ) or 0
-    dictation_ready = db.scalar(
-        select(func.count(models.SpellingWord.id))
-        .where(*_active_learning_word_filter())
-        .where(models.SpellingWord.introduced_at.is_not(None))
-    ) or 0
+    dictation_ready = _dictation_ready_text_count(db)
     diagnostic_ranked = _diagnostic_candidate_words(db, 10)
     practice_ranked = _review_priority_words(db, 10, models.SpellingSessionType.practice)
     review_due_ranked = _review_priority_words(db, 10, models.SpellingSessionType.review_due)
@@ -2923,7 +3281,7 @@ def get_spelling_daily_plan(db: Session) -> schemas.SpellingDailyPlanOut:
         models.SpellingSessionType.practice.value: "Repair the highest-risk recent spelling mistakes.",
         models.SpellingSessionType.review_due.value: "Complete the most valuable scheduled reviews.",
         models.SpellingSessionType.exploration.value: "Introduce a useful new Oxford word.",
-        models.SpellingSessionType.dictation.value: "Strengthen recall through sentence dictation.",
+        models.SpellingSessionType.dictation.value: "Strengthen listening and accurate writing with adaptive dictation.",
     }
     return schemas.SpellingDailyPlanOut(
         recommended_mode=recommended,
@@ -3159,7 +3517,7 @@ def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
         .where(*_active_learning_word_filter())
         .where(review_candidate)
     ) or 0
-    dictation_ready_words = practice_queue_words
+    dictation_ready_words = _dictation_ready_text_count(db)
     llm_suggested_words = db.scalar(
         select(func.count(models.SpellingSuggestion.id)).where(
             models.SpellingSuggestion.status.in_(["validated", "approved"])

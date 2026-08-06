@@ -257,11 +257,15 @@ def _set_targets(db: Session, text: models.SpellingDictationText, terms: list[st
     ]
 
 
-def to_schema(text: models.SpellingDictationText) -> schemas.DictationTextRead:
+def to_schema(
+    text: models.SpellingDictationText,
+    *,
+    reveal_content: bool = True,
+) -> schemas.DictationTextRead:
     return schemas.DictationTextRead(
         id=text.id,
         title=text.title,
-        content=text.content,
+        content=text.content if reveal_content else None,
         source_type=text.source_type,
         level=text.level,
         locale=text.locale,
@@ -278,7 +282,8 @@ def to_schema(text: models.SpellingDictationText) -> schemas.DictationTextRead:
                 order_index=target.order_index,
             )
             for target in text.targets
-        ],
+        ] if reveal_content else [],
+        target_count=len(text.targets),
         use_count=text.use_count,
         last_used_at=text.last_used_at,
         created_at=text.created_at,
@@ -360,7 +365,7 @@ def list_dictation_texts(
         ) or 0
     )
     return schemas.DictationTextListOut(
-        items=[to_schema(item) for item in rows],
+        items=[to_schema(item, reveal_content=item.source_type == "personal") for item in rows],
         total=len(rows),
         counts=all_counts,
     )
@@ -570,7 +575,7 @@ def adapt_dictation_text(
     if len(targets) < target_min:
         fallback = _least_recent_curated(db, payload.level)
         return schemas.DictationTextAdaptResult(
-            text=to_schema(fallback),
+            text=to_schema(fallback, reveal_content=False),
             used_fallback=True,
             fallback_reason="The source did not contain enough suitable target spellings.",
         )
@@ -581,11 +586,14 @@ def adapt_dictation_text(
         select(models.SpellingDictationText).where(models.SpellingDictationText.adaptation_key == key)
     )
     if cached:
-        return schemas.DictationTextAdaptResult(text=to_schema(cached), cached=True)
+        return schemas.DictationTextAdaptResult(
+            text=to_schema(cached, reveal_content=False),
+            cached=True,
+        )
     if settings and not settings.ai_generation_enabled:
         fallback = _least_recent_curated(db, payload.level)
         return schemas.DictationTextAdaptResult(
-            text=to_schema(fallback),
+            text=to_schema(fallback, reveal_content=False),
             used_fallback=True,
             fallback_reason="AI generation is disabled in Settings.",
         )
@@ -594,7 +602,7 @@ def adapt_dictation_text(
     if not generated:
         fallback = _least_recent_curated(db, payload.level)
         return schemas.DictationTextAdaptResult(
-            text=to_schema(fallback),
+            text=to_schema(fallback, reveal_content=False),
             used_fallback=True,
             fallback_reason=failure,
         )
@@ -604,7 +612,10 @@ def adapt_dictation_text(
         )
     )
     if existing:
-        return schemas.DictationTextAdaptResult(text=to_schema(existing), cached=True)
+        return schemas.DictationTextAdaptResult(
+            text=to_schema(existing, reveal_content=False),
+            cached=True,
+        )
 
     now = datetime.utcnow()
     adapted = models.SpellingDictationText(
@@ -632,7 +643,7 @@ def adapt_dictation_text(
     _set_targets(db, adapted, targets)
     db.commit()
     db.refresh(adapted)
-    return schemas.DictationTextAdaptResult(text=to_schema(adapted))
+    return schemas.DictationTextAdaptResult(text=to_schema(adapted, reveal_content=False))
 
 
 def mark_used(db: Session, text: models.SpellingDictationText) -> None:

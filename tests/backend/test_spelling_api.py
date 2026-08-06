@@ -520,7 +520,7 @@ def test_actionable_review_words_match_due_metrics_and_practice_queue() -> None:
     assert dashboard["stats"]["due_today_words"] == 2
     assert dashboard["stats"]["review_debt_words"] == 1
     assert dashboard["stats"]["practice_queue_words"] == 3
-    assert dashboard["stats"]["dictation_ready_words"] == 3
+    assert dashboard["stats"]["dictation_ready_words"] == 5
 
     practice = client.post(
         "/spelling/sessions",
@@ -575,7 +575,7 @@ def test_dashboard_stats_keep_llm_suggestions_separate_from_oxford_coverage() ->
     assert stats["llm_suggested_words"] >= 1
     assert stats["llm_pending_suggestions"] >= 1
     assert stats["practice_queue_words"] == 1
-    assert stats["dictation_ready_words"] == 1
+    assert stats["dictation_ready_words"] == 5
     assert dashboard["core5k"]["total_words"] == 4
 
 
@@ -853,9 +853,14 @@ def test_practice_and_dictation_sessions_create_expected_items() -> None:
     )
     assert dictation.status_code == 200
     dictation_payload = dictation.json()
+    assert dictation_payload["dictation_level"] == "sentence"
     assert dictation_payload["items"][0]["mode"] == "dictation"
     assert dictation_payload["items"][0]["item_type"] == "sentence_dictation"
-    assert dictation_payload["items"][0]["prompt_text"]
+    assert dictation_payload["items"][0]["word_id"] is None
+    assert dictation_payload["items"][0]["term"] == "Dictation"
+    assert dictation_payload["items"][0]["prompt_text"] == "Listen to the complete text and type what you hear."
+    assert dictation_payload["items"][0]["segment_count"] == 1
+    assert dictation_payload["items"][0]["audio_url"].endswith("/audio")
 
 
 def test_diagnostic_session_creates_personal_practice_priority() -> None:
@@ -1375,19 +1380,40 @@ def test_dictation_grades_target_word_and_returns_sentence_diff() -> None:
             "mode": "exploration",
         },
     )
-    session = client.post(
-        "/spelling/sessions",
-        json={"session_type": "dictation", "target_size": 1},
-    ).json()
-    item = session["items"][0]
+    db = SessionLocal()
+    try:
+        word = db.get(models.SpellingWord, first["word"]["id"])
+        assert word is not None
+        legacy_session = models.SpellingSession(
+            session_type=models.SpellingSessionType.dictation,
+            total_items=1,
+            sentence_items=1,
+        )
+        db.add(legacy_session)
+        db.flush()
+        legacy_item = models.SpellingSessionItem(
+            session_id=legacy_session.id,
+            word_id=word.id,
+            prompt_text=word.example_sentence or repository._example_sentence(word.term),
+            item_type=models.SpellingSessionItemType.sentence_dictation,
+            order_index=0,
+        )
+        db.add(legacy_item)
+        db.commit()
+        session_id = legacy_session.id
+        item_id = legacy_item.id
+        term = word.term
+        prompt_text = legacy_item.prompt_text
+    finally:
+        db.close()
 
     target_wrong = client.post(
         "/spelling/attempts",
         json={
-            "session_id": session["session_id"],
-            "session_item_id": item["session_item_id"],
-            "word_id": item["word_id"],
-            "attempt_text": item["prompt_text"].replace(item["term"], "definately"),
+            "session_id": session_id,
+            "session_item_id": item_id,
+            "word_id": first["word"]["id"],
+            "attempt_text": prompt_text.replace(term, "definately"),
             "mode": "dictation",
         },
     )
@@ -1403,7 +1429,7 @@ def test_dictation_grades_target_word_and_returns_sentence_diff() -> None:
 
     correction = client.post(
         f"/spelling/attempts/{wrong_payload['attempt_id']}/correct",
-        json={"correction_text": item["term"]},
+        json={"correction_text": term},
     )
     assert correction.status_code == 200
     assert correction.json()["allow_next"] is True
@@ -1411,10 +1437,10 @@ def test_dictation_grades_target_word_and_returns_sentence_diff() -> None:
     partial_sentence = client.post(
         "/spelling/attempts",
         json={
-            "session_id": session["session_id"],
-            "session_item_id": item["session_item_id"],
-            "word_id": item["word_id"],
-            "attempt_text": item["term"],
+            "session_id": session_id,
+            "session_item_id": item_id,
+            "word_id": first["word"]["id"],
+            "attempt_text": term,
             "mode": "dictation",
         },
     )
@@ -1430,10 +1456,10 @@ def test_dictation_grades_target_word_and_returns_sentence_diff() -> None:
     full_sentence = client.post(
         "/spelling/attempts",
         json={
-            "session_id": session["session_id"],
-            "session_item_id": item["session_item_id"],
-            "word_id": item["word_id"],
-            "attempt_text": item["prompt_text"].upper().rstrip("."),
+            "session_id": session_id,
+            "session_item_id": item_id,
+            "word_id": first["word"]["id"],
+            "attempt_text": prompt_text.upper().rstrip("."),
             "mode": "dictation",
         },
     )

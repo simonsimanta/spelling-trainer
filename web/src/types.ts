@@ -267,6 +267,22 @@ export type AttemptResult = {
   error_pattern?: string | null;
   next_due_date: string;
   llm_feedback?: string | null;
+  error_analysis?: {
+    primary_pattern: string;
+    pattern_label: string;
+    secondary_patterns: string[];
+    edit_operations: Array<Record<string, string | number>>;
+    explanation: string;
+    memory_strategy: string;
+    confidence: number;
+    analysis_source: "ai" | "fallback";
+    transfer_words: Array<{
+      term: string;
+      reason: string;
+      confidence: number;
+      pool_status: string;
+    }>;
+  } | null;
   chunk_hint: string;
   mnemonic: string;
   example_sentence: string;
@@ -302,6 +318,7 @@ export type Settings = {
   tts_model: string;
   ai_model: string;
   ai_generation_enabled: boolean;
+  english_variant: "en-GB" | "en-US";
   content_bulk_limit: number;
 };
 

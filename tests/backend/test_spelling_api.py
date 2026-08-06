@@ -2,6 +2,8 @@ import os
 import tempfile
 from datetime import date, datetime, timedelta
 
+import pytest
+
 db_fd, db_path = tempfile.mkstemp(suffix=".db")
 os.close(db_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
@@ -14,7 +16,7 @@ from sqlalchemy.exc import OperationalError
 from app.backend import models, readiness, repository, schemas
 from app.backend.api import app, startup_seed
 from app.backend.db import Base, SessionLocal, engine, get_db
-from app.backend.spelling import audio, oxford
+from app.backend.spelling import audio, error_analysis, oxford
 
 
 def _client() -> TestClient:
@@ -539,7 +541,17 @@ def test_dashboard_stats_keep_llm_suggestions_separate_from_oxford_coverage() ->
             db,
             schemas.SpellingWordCreate(term="conscientious", level="suggested", source="llm"),
         )
-        db.add(models.SpellingSuggestion(word_id=suggested.id, term=suggested.term, reason="Similar difficult word", status="pending"))
+        db.add(
+            models.SpellingSuggestion(
+                word_id=suggested.id,
+                term=suggested.term,
+                reason="Validated difficult word",
+                status="validated",
+                validation_status="validated",
+                confidence=0.9,
+                evidence_count=1,
+            )
+        )
         db.add(models.SpellingAudioManifest(word_id=suggested.id, term=suggested.term, status="generated"))
         db.commit()
     finally:
@@ -646,7 +658,14 @@ def test_exploration_can_use_llm_suggested_word_pool() -> None:
             db,
             schemas.SpellingWordCreate(term="conscientious", level="suggested", source="llm"),
         )
-        db.add(models.SpellingSuggestion(word_id=suggested.id, term=suggested.term, reason="Similar difficult word", status="approved"))
+        db.add(
+            models.SpellingSuggestion(
+                word_id=suggested.id,
+                term=suggested.term,
+                reason="Approved difficult word",
+                status="approved",
+            )
+        )
         db.commit()
     finally:
         db.close()
@@ -1219,9 +1238,9 @@ def test_attempts_update_points_feedback_srs_activity_and_correction() -> None:
     assert wrong_payload["diff_json"]["operations"]
     assert wrong_payload["llm_feedback"]
 
-    suggestions = client.get("/spelling/suggestions", params={"status": "auto_added"})
-    assert suggestions.status_code == 200
-    assert suggestions.json()
+    assert wrong_payload["error_analysis"]
+    assert wrong_payload["error_analysis"]["primary_pattern"] in error_analysis.PATTERN_LABELS
+    assert client.get("/spelling/suggestions", params={"status": "auto_added"}).json() == []
 
     correction = client.post(
         f"/spelling/attempts/{wrong_payload['attempt_id']}/correct",
@@ -1397,6 +1416,145 @@ def test_dictation_assessment_handles_sentence_and_compound_word_cases() -> None
         assert result.target_spelling_correct is target_correct
         assert result.sentence_complete is sentence_complete
         assert 0.0 <= result.sentence_similarity <= 1.0
+
+
+@pytest.mark.parametrize(
+    ("correct", "attempt", "expected_pattern"),
+    [
+        ("necessary", "necesary", "double_consonant"),
+        ("receive", "recieve", "ie_ei_confusion"),
+        ("knowledge", "nowledge", "silent_letter"),
+        ("calendar", "calnedar", "adjacent_transposition"),
+        ("stationary", "stationery", "homophone_confusion"),
+        ("necessary", "necessery", "suffix_confusion"),
+        ("environment", "enviroment", "letter_omission"),
+        ("until", "unxtil", "letter_insertion"),
+        ("necessary", "necesssary", "double_consonant"),
+        ("calendar", "calender", "letter_substitution"),
+    ],
+)
+def test_deterministic_error_analysis_golden_set(
+    correct: str,
+    attempt: str,
+    expected_pattern: str,
+) -> None:
+    analysis = error_analysis.deterministic_analysis(correct, attempt)
+    assert analysis["primary_pattern"] == expected_pattern
+    assert analysis["edit_operations"]
+    assert 0.0 <= analysis["confidence"] <= 1.0
+
+
+def test_miss_analysis_persists_validated_pool_without_due_review() -> None:
+    _seed_core_words()
+    client = _client()
+    db = SessionLocal()
+    try:
+        word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "necessary"))
+        assert word is not None
+        word_id = word.id
+    finally:
+        db.close()
+
+    response = client.post(
+        "/spelling/attempts",
+        json={"word_id": word_id, "attempt_text": "necesary", "mode": "diagnostic"},
+    )
+    assert response.status_code == 200
+    result = response.json()
+    assert result["error_analysis"]["primary_pattern"] == "double_consonant"
+    assert result["error_analysis"]["analysis_source"] == "fallback"
+    assert result["error_analysis"]["transfer_words"]
+
+    db = SessionLocal()
+    try:
+        stored = db.get(models.SpellingAttempt, result["attempt_id"])
+        assert stored is not None
+        assert stored.error_analysis is not None
+        suggestions = list(
+            db.scalars(
+                select(models.SpellingSuggestion).where(models.SpellingSuggestion.status == "validated")
+            ).all()
+        )
+        assert suggestions
+        newly_created = []
+        for suggestion in suggestions:
+            assert suggestion.validation_status == "validated"
+            assert suggestion.evidence_count == 1
+            assert suggestion.word_id is not None
+            suggested_word = db.get(models.SpellingWord, suggestion.word_id)
+            if suggested_word and suggested_word.source == "llm_suggestion":
+                newly_created.append(suggested_word)
+        assert newly_created
+        assert all(
+            db.scalar(select(models.SpellingReview).where(models.SpellingReview.word_id == item.id)) is None
+            for item in newly_created
+        )
+    finally:
+        db.close()
+
+
+def test_structured_ai_analysis_is_cached_for_repeated_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_core_words()
+    client = _client()
+    calls = 0
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            payload = {
+                "primary_pattern": "double_consonant",
+                "explanation": "One of the doubled consonants was omitted.",
+                "memory_strategy": "Mark both consonants before spelling the word.",
+                "confidence": 0.98,
+                "transfer_words": [
+                    {
+                        "term": "embarrass",
+                        "reason": "It also contains a doubled consonant.",
+                        "confidence": 0.95,
+                    }
+                ],
+            }
+            return {"output": [{"content": [{"text": __import__("json").dumps(payload)}]}]}
+
+    def fake_post(*_args: object, **_kwargs: object) -> FakeResponse:
+        nonlocal calls
+        calls += 1
+        return FakeResponse()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(error_analysis.requests, "post", fake_post)
+    db = SessionLocal()
+    try:
+        word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "necessary"))
+        assert word is not None
+        word_id = word.id
+    finally:
+        db.close()
+
+    for _ in range(2):
+        response = client.post(
+            "/spelling/attempts",
+            json={"word_id": word_id, "attempt_text": "necesary", "mode": "diagnostic"},
+        )
+        assert response.status_code == 200
+        assert response.json()["error_analysis"]["analysis_source"] == "ai"
+    assert calls == 1
+
+    db = SessionLocal()
+    try:
+        cache = db.scalar(
+            select(models.SpellingFeedbackCache).where(
+                models.SpellingFeedbackCache.word_id == word_id,
+                models.SpellingFeedbackCache.normalized_attempt == "necesary",
+            )
+        )
+        assert cache is not None
+        assert cache.hit_count == 1
+        assert cache.prompt_version == error_analysis.PROMPT_VERSION
+    finally:
+        db.close()
 
 
 def test_content_and_audio_bulk_generation(monkeypatch, tmp_path) -> None:

@@ -211,6 +211,18 @@ export function SettingsView({
             <option value="disabled">Disabled</option>
           </select>
         </label>
+        <label>English standard
+          <select
+            value={settings.english_variant}
+            onChange={(event) => setSettings({
+              ...settings,
+              english_variant: event.target.value as Settings["english_variant"]
+            })}
+          >
+            <option value="en-GB">British English</option>
+            <option value="en-US">American English</option>
+          </select>
+        </label>
         <label className="advanced-field">TTS Model
           <input
             value={settings.tts_model}

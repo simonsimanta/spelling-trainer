@@ -46,6 +46,7 @@ class AppSettings(Base):
     tts_model: Mapped[str] = mapped_column(String(80), default="gpt-4o-mini-tts", nullable=False)
     ai_model: Mapped[str] = mapped_column(String(80), default="gpt-4o-mini", nullable=False)
     ai_generation_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    english_variant: Mapped[str] = mapped_column(String(10), default="en-GB", nullable=False)
     content_bulk_limit: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -302,6 +303,17 @@ class SpellingAttempt(Base):
     word = relationship("SpellingWord", back_populates="attempts")
     session = relationship("SpellingSession", back_populates="attempts")
     session_item = relationship("SpellingSessionItem", back_populates="attempts")
+    error_analysis = relationship(
+        "SpellingErrorAnalysis",
+        back_populates="attempt",
+        cascade="all, delete",
+        uselist=False,
+    )
+    suggestion_evidence = relationship(
+        "SpellingSuggestionEvidence",
+        back_populates="attempt",
+        cascade="all, delete",
+    )
 
 
 class SpellingSuggestion(Base):
@@ -317,9 +329,63 @@ class SpellingSuggestion(Base):
     term: Mapped[str] = mapped_column(String(120), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
+    pattern_code: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    validation_status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
+    last_suggested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     word = relationship("SpellingWord", back_populates="suggestions")
+    evidence = relationship("SpellingSuggestionEvidence", back_populates="suggestion", cascade="all, delete")
+
+
+class SpellingErrorAnalysis(Base):
+    __tablename__ = "spelling_error_analyses"
+    __table_args__ = (UniqueConstraint("attempt_id", name="uq_spelling_error_analysis_attempt"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    attempt_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_attempts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    primary_pattern: Mapped[str] = mapped_column(String(80), nullable=False)
+    secondary_patterns: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    edit_operations: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    memory_strategy: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    analysis_source: Mapped[str] = mapped_column(String(30), default="fallback", nullable=False)
+    model: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    locale: Mapped[str] = mapped_column(String(10), default="en-GB", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    attempt = relationship("SpellingAttempt", back_populates="error_analysis")
+
+
+class SpellingSuggestionEvidence(Base):
+    __tablename__ = "spelling_suggestion_evidence"
+    __table_args__ = (
+        UniqueConstraint("suggestion_id", "attempt_id", name="uq_spelling_suggestion_evidence_attempt"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    suggestion_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_suggestions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    attempt_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_attempts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_word_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_words.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    pattern_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    suggestion = relationship("SpellingSuggestion", back_populates="evidence")
+    attempt = relationship("SpellingAttempt", back_populates="suggestion_evidence")
 
 
 class SpellingPattern(Base):
@@ -429,6 +495,10 @@ class SpellingFeedbackCache(Base):
     normalized_attempt: Mapped[str] = mapped_column(String(120), nullable=False)
     error_pattern: Mapped[str] = mapped_column(String(120), nullable=False)
     feedback_text: Mapped[str] = mapped_column(Text, nullable=False)
+    analysis_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    model: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(40), default="legacy", nullable=False)
+    locale: Mapped[str] = mapped_column(String(10), default="en-GB", nullable=False)
     hit_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     estimated_input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     estimated_output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

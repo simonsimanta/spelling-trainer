@@ -1611,6 +1611,33 @@ p {
   margin-top: 12px;
 }
 
+.error-analysis-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 20px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #fecdd3;
+}
+
+.error-analysis-summary span,
+.error-analysis-summary div {
+  min-width: 0;
+}
+
+.error-analysis-summary b,
+.error-analysis-summary strong {
+  display: block;
+}
+
+.error-analysis-summary div {
+  grid-column: 1 / -1;
+}
+
+.error-analysis-summary p {
+  margin: 4px 0 0;
+}
+
 .correction-form,
 .spelling-form,
 .settings-form,

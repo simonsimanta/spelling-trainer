@@ -32,6 +32,7 @@ class SettingsRead(BaseModel):
     tts_model: str
     ai_model: str
     ai_generation_enabled: bool
+    english_variant: str = "en-GB"
     content_bulk_limit: int
 
     model_config = {"from_attributes": True}
@@ -43,6 +44,7 @@ class SettingsUpdate(BaseModel):
     tts_model: Optional[str] = Field(default=None, min_length=1, max_length=80)
     ai_model: Optional[str] = Field(default=None, max_length=80)
     ai_generation_enabled: Optional[bool] = None
+    english_variant: Optional[Literal["en-GB", "en-US"]] = None
     content_bulk_limit: Optional[int] = Field(default=None, ge=1, le=5000)
 
 
@@ -223,6 +225,7 @@ class SpellingAttemptResult(BaseModel):
     error_pattern: Optional[str]
     next_due_date: date
     llm_feedback: Optional[str]
+    error_analysis: Optional[Dict[str, Any]] = None
     chunk_hint: str
     mnemonic: str
     example_sentence: str
@@ -301,6 +304,10 @@ class SpellingSuggestionRead(BaseModel):
     term: str
     reason: str
     status: str
+    pattern_code: Optional[str] = None
+    confidence: float = 0.0
+    evidence_count: int = 0
+    validation_status: str = "pending"
 
     model_config = {"from_attributes": True}
 

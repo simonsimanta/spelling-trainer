@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.backend import models, schemas
+from app.backend.spelling import error_analysis
 from app.backend.spelling.content_quality import (
     ContentGenerationResult,
     contains_target,
@@ -122,6 +123,36 @@ DEFAULT_PATTERNS = [
         "label": "Homophone confusion",
         "description": "Words that sound alike but differ in spelling and meaning.",
         "examples": ["their", "there", "they're"],
+    },
+    {
+        "code": "letter_omission",
+        "label": "Letter omission",
+        "description": "One or more written letters were left out.",
+        "examples": ["environment", "definitely", "necessary"],
+    },
+    {
+        "code": "letter_insertion",
+        "label": "Extra letter",
+        "description": "One or more letters were added to the spelling.",
+        "examples": ["until", "across", "recommend"],
+    },
+    {
+        "code": "letter_substitution",
+        "label": "Letter substitution",
+        "description": "A correct letter was replaced by a different letter.",
+        "examples": ["definitely", "separate", "calendar"],
+    },
+    {
+        "code": "adjacent_transposition",
+        "label": "Adjacent transposition",
+        "description": "Two neighbouring letters were written in reverse order.",
+        "examples": ["receive", "friend", "quiet"],
+    },
+    {
+        "code": "suffix_confusion",
+        "label": "Suffix confusion",
+        "description": "The ending of a word was omitted, replaced, or reordered.",
+        "examples": ["definitely", "separately", "accommodation"],
     },
 ]
 
@@ -407,42 +438,13 @@ def _mnemonic_for_word(word: str) -> str:
 
 
 def _error_pattern(correct_word: str, attempt_text: str) -> str:
-    correct = _normalize_text(correct_word)
-    attempt = _normalize_text(attempt_text)
-    if attempt == correct:
+    if _normalize_text(correct_word) == _normalize_text(attempt_text):
         return "none"
-    if len(attempt) < len(correct):
-        return "missing_letter"
-    if len(attempt) > len(correct):
-        return "extra_letter"
-    ratio = SequenceMatcher(None, correct, attempt).ratio()
-    if ratio > 0.75:
-        return "close_spelling"
-    return "pattern_confusion"
+    return error_analysis.deterministic_analysis(correct_word, attempt_text)["primary_pattern"]
 
 
 def _build_diff_json(correct_word: str, attempt_text: str) -> Dict[str, Any]:
-    correct = _normalize_text(correct_word)
-    attempt = _normalize_text(attempt_text)
-    matcher = SequenceMatcher(None, correct, attempt)
-    operations: List[Dict[str, Any]] = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-        if tag == "replace":
-            operations.append(
-                {
-                    "type": "replace",
-                    "expected": correct[i1:i2],
-                    "actual": attempt[j1:j2],
-                    "position_correct": i1,
-                    "position_attempt": j1,
-                }
-            )
-        elif tag == "delete":
-            operations.append({"type": "missing", "expected": correct[i1:i2], "position_correct": i1})
-        elif tag == "insert":
-            operations.append({"type": "extra", "actual": attempt[j1:j2], "position_attempt": j1})
+    operations = error_analysis.edit_operations(correct_word, attempt_text)
     return {
         "correct": correct_word,
         "attempt": attempt_text,
@@ -537,83 +539,6 @@ def _build_sentence_diff_json(
         "sentence_similarity": result.sentence_similarity,
         "operations": operations,
     }
-
-
-def _estimate_tokens(text: str) -> int:
-    return max(1, round(len(text) / 4))
-
-
-def _llm_feedback(correct_word: str, attempt_text: str, error_pattern: str) -> str:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        if error_pattern == "none":
-            return "Correct. Say the word once and spell it again later from memory."
-        if error_pattern == "missing_letter":
-            return "Almost there. You missed one or more letters."
-        if error_pattern == "extra_letter":
-            return "You added an extra letter. Type slowly and check each chunk."
-        if error_pattern == "close_spelling":
-            return "Very close. Check the middle letters and common confusion pattern."
-        return "Break the word into chunks, then type it once more from memory."
-
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    prompt = (
-        "Return 3 short spelling feedback lines: what happened, a chunk hint, and a mnemonic. "
-        f"Correct word: {correct_word}. Attempt: {attempt_text}. Error type: {error_pattern}."
-    )
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model, "input": prompt},
-            timeout=15,
-        )
-        if response.status_code >= 400:
-            return "AI feedback is unavailable right now. Use chunking and try once more."
-        data = response.json()
-        texts: List[str] = []
-        for item in data.get("output", []):
-            for content in item.get("content", []):
-                text = content.get("text")
-                if text:
-                    texts.append(text)
-        return "\n".join(texts).strip()[:500] or "Try again with chunking and repetition."
-    except Exception:
-        return "Try chunking the word and type it once more."
-
-
-def _cached_llm_feedback(
-    db: Session,
-    word: models.SpellingWord,
-    attempt_text: str,
-    error_pattern: str,
-) -> str:
-    normalized_attempt = _normalize_text(attempt_text)
-    existing = db.scalar(
-        select(models.SpellingFeedbackCache).where(
-            models.SpellingFeedbackCache.word_id == word.id,
-            models.SpellingFeedbackCache.normalized_attempt == normalized_attempt,
-            models.SpellingFeedbackCache.error_pattern == error_pattern,
-        )
-    )
-    if existing:
-        existing.hit_count += 1
-        existing.updated_at = datetime.utcnow()
-        return existing.feedback_text
-
-    feedback = _llm_feedback(word.term, attempt_text, error_pattern)
-    db.add(
-        models.SpellingFeedbackCache(
-            word_id=word.id,
-            normalized_attempt=normalized_attempt,
-            error_pattern=error_pattern,
-            feedback_text=feedback,
-            hit_count=0,
-            estimated_input_tokens=_estimate_tokens(f"{word.term} {attempt_text} {error_pattern}"),
-            estimated_output_tokens=_estimate_tokens(feedback),
-        )
-    )
-    return feedback
 
 
 def _ensure_spelling_review(db: Session, word: models.SpellingWord) -> models.SpellingReview:
@@ -1720,19 +1645,27 @@ def _target_suggested_words(db: Session, limit: Optional[int] = None) -> List[mo
     suggested_ids = (
         select(models.SpellingSuggestion.word_id)
         .where(models.SpellingSuggestion.word_id.is_not(None))
-        .where(models.SpellingSuggestion.status.in_(["pending", "auto_added", "approved"]))
+        .where(
+            or_(
+                models.SpellingSuggestion.status == "approved",
+                and_(
+                    models.SpellingSuggestion.validation_status == "validated",
+                    models.SpellingSuggestion.status == "validated",
+                ),
+            )
+        )
     )
     stmt = (
         select(models.SpellingWord)
         .where(models.SpellingWord.is_active.is_(True))
-        .where(
-            or_(
-                models.SpellingWord.source.in_(["llm", "llm_suggestion"]),
-                models.SpellingWord.level == "suggested",
-                models.SpellingWord.id.in_(suggested_ids),
-            )
+        .where(models.SpellingWord.id.in_(suggested_ids))
+        .join(models.SpellingSuggestion, models.SpellingSuggestion.word_id == models.SpellingWord.id)
+        .order_by(
+            models.SpellingSuggestion.evidence_count.desc(),
+            models.SpellingSuggestion.confidence.desc(),
+            models.SpellingWord.frequency_rank.asc().nullslast(),
+            models.SpellingWord.term.asc(),
         )
-        .order_by(models.SpellingWord.created_at.asc(), models.SpellingWord.term.asc())
     )
     if limit is not None:
         stmt = stmt.limit(limit)
@@ -2243,14 +2176,9 @@ def _adaptive_interval(review: models.SpellingReview, first_try_correct: bool, f
 
 
 def _pattern_from_error(word: models.SpellingWord, error_pattern: str) -> str:
-    if error_pattern == "close_spelling":
-        if "ie" in word.term or "ei" in word.term:
-            return "ie_ei_confusion"
-        if any(pair in word.term for pair in ["ss", "rr", "mm", "cc"]):
-            return "double_consonant"
-    if error_pattern == "missing_letter":
-        return "silent_letter"
-    return "homophone_confusion"
+    if error_pattern in error_analysis.PATTERN_LABELS:
+        return error_pattern
+    return "letter_substitution"
 
 
 def _upsert_pattern_stats(db: Session, pattern_code: Optional[str], is_correct: bool) -> None:
@@ -2276,6 +2204,7 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
     word = db.get(models.SpellingWord, payload.word_id)
     if not word:
         raise ValueError("Word not found")
+    settings = get_settings(db)
     review = _ensure_spelling_review(db, word)
     session_item = db.get(models.SpellingSessionItem, payload.session_item_id) if payload.session_item_id else None
 
@@ -2305,9 +2234,22 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
     is_exploration_first_try = (
         payload.mode == models.SpellingMode.exploration.value and retry_index == 0 and not was_forced_correction
     )
-    pattern = "none" if correct else _error_pattern(word.term, feedback_attempt_text)
+    analysis_result: Optional[Dict[str, Any]] = None
+    if correct:
+        pattern = "none"
+        feedback = "Correct. Say the word once, then recall it again after a delay."
+    else:
+        analysis_result = error_analysis.cached_analysis(
+            db,
+            word,
+            feedback_attempt_text,
+            model=settings.ai_model,
+            locale=settings.english_variant,
+            enabled=settings.ai_generation_enabled,
+        )
+        pattern = analysis_result["primary_pattern"]
+        feedback = error_analysis.feedback_text(analysis_result)
     points = _points_for_attempt(correct, payload.used_hint, payload.used_reveal, retry_index)
-    feedback = _cached_llm_feedback(db, word, feedback_attempt_text, pattern)
     diff_json = None
     sentence_diff_json = None
     now = datetime.utcnow()
@@ -2386,7 +2328,6 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
         review.forced_correction_required = False if is_diagnostic else True
         review.consecutive_forced_corrections = 0 if not was_forced_correction else review.consecutive_forced_corrections + 1
         diff_json = _build_diff_json(word.term, feedback_attempt_text)
-        _create_suggestion_from_error(db, word, pattern)
         if is_diagnostic:
             word.diagnostic_status = "missed"
             word.priority_score = round(DIAGNOSTIC_PRIORITY_BOOST + _word_usefulness_score(word), 4)
@@ -2450,6 +2391,16 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
         session_item_id=payload.session_item_id,
     )
     db.add(attempt)
+    db.flush()
+    if analysis_result is not None:
+        analysis_result = error_analysis.persist_analysis(
+            db,
+            attempt,
+            word,
+            analysis_result,
+            model=settings.ai_model,
+            locale=settings.english_variant,
+        )
 
     if payload.session_item_id:
         item = session_item
@@ -2502,6 +2453,7 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
         error_pattern=None if correct else pattern,
         next_due_date=review.due_date,
         llm_feedback=feedback,
+        error_analysis=analysis_result,
         chunk_hint=word.chunked_form or _chunk_hint(word.term),
         mnemonic=_mnemonic_for_word(word.term),
         example_sentence=word.example_sentence or _example_sentence(word.term),
@@ -2602,56 +2554,6 @@ def submit_spelling_correction(
         retries_remaining=0,
         skip_available=False,
     )
-
-
-def _create_suggestion_from_error(db: Session, word: models.SpellingWord, pattern: str) -> None:
-    candidates: List[str] = []
-    for group in CONFUSION_GROUPS:
-        if word.term in group:
-            candidates.extend([candidate for candidate in group if candidate != word.term])
-            break
-    for candidate in COMMON_CONFUSION_WORDS:
-        if candidate == word.term:
-            continue
-        similarity = SequenceMatcher(None, word.term, candidate).ratio()
-        if pattern == "close_spelling" and similarity >= 0.45:
-            candidates.append(candidate)
-        elif pattern != "close_spelling" and similarity >= 0.35:
-            candidates.append(candidate)
-    if not candidates:
-        candidates = [candidate for candidate in COMMON_CONFUSION_WORDS if candidate != word.term]
-
-    deduped: List[str] = []
-    for candidate in candidates:
-        if candidate not in deduped:
-            deduped.append(candidate)
-    for candidate in deduped[:3]:
-        term = candidate.strip().lower()
-        if len(term) < 3 or term == word.term:
-            continue
-        related_word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == term))
-        if not related_word:
-            related_word = models.SpellingWord(
-                term=term,
-                level="personal",
-                source="llm_suggestion",
-                chunked_form=_chunk_hint(term),
-                example_sentence=_example_sentence(term),
-                difficulty_score=0.7,
-                mastery_state="learning",
-                introduced_at=datetime.utcnow(),
-            )
-            db.add(related_word)
-            db.flush()
-            db.add(models.SpellingReview(word_id=related_word.id, due_date=date.today(), interval_days=0))
-        reason = f"Auto-added due to {pattern} while practicing '{word.term}'"
-        suggestion = db.scalar(select(models.SpellingSuggestion).where(models.SpellingSuggestion.term == term))
-        if suggestion:
-            suggestion.word_id = related_word.id
-            suggestion.reason = reason
-            suggestion.status = "auto_added"
-        else:
-            db.add(models.SpellingSuggestion(word_id=related_word.id, term=term, reason=reason, status="auto_added"))
 
 
 def list_spelling_suggestions(db: Session, status: str = "pending") -> List[models.SpellingSuggestion]:
@@ -3181,11 +3083,11 @@ def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
     dictation_ready_words = practice_queue_words
     llm_suggested_words = db.scalar(
         select(func.count(models.SpellingSuggestion.id)).where(
-            models.SpellingSuggestion.status.in_(["pending", "auto_added", "approved"])
+            models.SpellingSuggestion.status.in_(["validated", "approved"])
         )
     ) or 0
     llm_pending_suggestions = db.scalar(
-        select(func.count(models.SpellingSuggestion.id)).where(models.SpellingSuggestion.status.in_(["pending", "auto_added"]))
+        select(func.count(models.SpellingSuggestion.id)).where(models.SpellingSuggestion.status == "validated")
     ) or 0
     content_generated_words = db.scalar(
         select(func.count(func.distinct(models.SpellingWordContent.word_id)))

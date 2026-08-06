@@ -575,6 +575,24 @@ export function Feedback({ result }: { result: AttemptResult }) {
         </div>
       ) : null}
       {feedbackText ? <p>{feedbackText}</p> : null}
+      {!resultCorrect && result.error_analysis ? (
+        <div className="error-analysis-summary">
+          <span>
+            <b>Pattern</b>
+            <strong>{result.error_analysis.pattern_label}</strong>
+          </span>
+          <span>
+            <b>Analysis</b>
+            <strong>{Math.round(result.error_analysis.confidence * 100)}% confidence</strong>
+          </span>
+          {result.error_analysis.transfer_words.length ? (
+            <div>
+              <b>AI practice pool</b>
+              <p>{result.error_analysis.transfer_words.map((item) => item.term).join(", ")}</p>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {!resultCorrect && result.diff_json?.operations?.length ? (
         <div className="diff-row">
           {result.diff_json.operations.map((operation, index) => (

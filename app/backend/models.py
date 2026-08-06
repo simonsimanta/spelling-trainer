@@ -79,6 +79,8 @@ class SpellingSessionItemType(str, enum.Enum):
     word_scramble = "word_scramble"
     choose_correct = "choose_correct"
     sentence_dictation = "sentence_dictation"
+    passage_dictation = "passage_dictation"
+    paragraph_dictation = "paragraph_dictation"
 
 
 class SpellingSessionItemStatus(str, enum.Enum):
@@ -215,6 +217,8 @@ class SpellingDictationText(Base):
         cascade="all, delete-orphan",
         order_by="SpellingDictationTextTarget.order_index",
     )
+    session_items = relationship("SpellingSessionItem", back_populates="dictation_text")
+    submissions = relationship("SpellingDictationSubmission", back_populates="text")
 
 
 class SpellingDictationTextTarget(Base):
@@ -282,6 +286,10 @@ class SpellingSession(Base):
     new_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     confusion_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sentence_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    dictation_level: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    dictation_target_accuracy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    dictation_word_accuracy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    dictation_submission_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     items = relationship(
@@ -291,6 +299,9 @@ class SpellingSession(Base):
         order_by="SpellingSessionItem.order_index",
     )
     attempts = relationship("SpellingAttempt", back_populates="session")
+    dictation_submissions = relationship(
+        "SpellingDictationSubmission", back_populates="session", cascade="all, delete"
+    )
 
 
 class SpellingSessionItem(Base):
@@ -300,6 +311,9 @@ class SpellingSessionItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("spelling_sessions.id", ondelete="CASCADE"), nullable=False)
     word_id: Mapped[Optional[int]] = mapped_column(ForeignKey("spelling_words.id", ondelete="CASCADE"), nullable=True)
+    dictation_text_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_dictation_texts.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
     item_type: Mapped[SpellingSessionItemType] = mapped_column(
         SAEnum(SpellingSessionItemType, name="spelling_session_item_type", native_enum=False), nullable=False
@@ -318,7 +332,11 @@ class SpellingSessionItem(Base):
 
     session = relationship("SpellingSession", back_populates="items")
     word = relationship("SpellingWord", back_populates="session_items")
+    dictation_text = relationship("SpellingDictationText", back_populates="session_items")
     attempts = relationship("SpellingAttempt", back_populates="session_item")
+    dictation_submission = relationship(
+        "SpellingDictationSubmission", back_populates="session_item", uselist=False, cascade="all, delete"
+    )
 
 
 class SpellingAttempt(Base):
@@ -359,6 +377,11 @@ class SpellingAttempt(Base):
         ForeignKey("spelling_session_items.id", ondelete="SET NULL"),
         nullable=True,
     )
+    dictation_submission_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_dictation_submissions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     word = relationship("SpellingWord", back_populates="attempts")
@@ -375,6 +398,98 @@ class SpellingAttempt(Base):
         back_populates="attempt",
         cascade="all, delete",
     )
+    dictation_submission = relationship("SpellingDictationSubmission", back_populates="spelling_attempts")
+    dictation_target_results = relationship("SpellingDictationTargetResult", back_populates="attempt")
+
+
+class SpellingDictationProgress(Base):
+    __tablename__ = "spelling_dictation_progress"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    current_level: Mapped[str] = mapped_column(String(20), default="sentence", nullable=False)
+    previous_level: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    last_evaluated_session_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    level_started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    level_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SpellingDictationSubmission(Base):
+    __tablename__ = "spelling_dictation_submissions"
+    __table_args__ = (
+        UniqueConstraint("session_item_id", name="uq_spelling_dictation_submission_item"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    session_item_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_session_items.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    text_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_dictation_texts.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    level: Mapped[str] = mapped_column(String(20), nullable=False)
+    attempt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_word_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt_word_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    word_error_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    word_accuracy: Mapped[float] = mapped_column(Float, nullable=False)
+    target_accuracy: Mapped[float] = mapped_column(Float, nullable=False)
+    capitalization_accuracy: Mapped[float] = mapped_column(Float, nullable=False)
+    punctuation_accuracy: Mapped[float] = mapped_column(Float, nullable=False)
+    omissions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    additions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    substitutions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    replay_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    session = relationship("SpellingSession", back_populates="dictation_submissions")
+    session_item = relationship("SpellingSessionItem", back_populates="dictation_submission")
+    text = relationship("SpellingDictationText", back_populates="submissions")
+    targets = relationship(
+        "SpellingDictationTargetResult",
+        back_populates="submission",
+        cascade="all, delete-orphan",
+        order_by="SpellingDictationTargetResult.order_index",
+    )
+    spelling_attempts = relationship("SpellingAttempt", back_populates="dictation_submission")
+
+
+class SpellingDictationTargetResult(Base):
+    __tablename__ = "spelling_dictation_target_results"
+    __table_args__ = (
+        UniqueConstraint("submission_id", "target_term", name="uq_spelling_dictation_result_target"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    submission_id: Mapped[int] = mapped_column(
+        ForeignKey("spelling_dictation_submissions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    text_target_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_dictation_text_targets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    word_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_words.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    attempt_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_attempts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    target_term: Mapped[str] = mapped_column(String(120), nullable=False)
+    attempt_term: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    is_correct: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    feeds_practice: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    submission = relationship("SpellingDictationSubmission", back_populates="targets")
+    attempt = relationship("SpellingAttempt", back_populates="dictation_target_results")
 
 
 class SpellingSuggestion(Base):

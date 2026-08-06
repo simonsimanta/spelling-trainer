@@ -133,18 +133,18 @@ export function modeAvailability(card: ModeCard, dashboard: Dashboard | null): M
   if (card.view === "dictation") {
     if (stats.dictation_ready_words) {
       return {
-        countLabel: `${stats.dictation_ready_words} ready`,
-        detail: "Trouble words are ready for sentence dictation.",
+        countLabel: `${stats.dictation_ready_words} texts`,
+        detail: "Reviewed texts are ready at your adaptive level.",
         actionLabel: "Start Dictation",
         actionView: "dictation",
         ready: true
       };
     }
     return {
-      countLabel: "0 ready",
-      detail: diagnosticReady ? "Run Diagnostic first; misses will unlock Dictation." : "No trouble words are ready for sentences.",
-      actionLabel: diagnosticReady ? "Start Diagnostic" : explorationReady ? "Explore Words" : "Load Words",
-      actionView: diagnosticReady ? "diagnostic" : explorationReady ? "exploration" : "settings",
+      countLabel: "0 texts",
+      detail: "No reviewed dictation texts are available at this level.",
+      actionLabel: "Open Dictation",
+      actionView: "dictation",
       ready: false
     };
   }

@@ -78,3 +78,15 @@ export async function playAudio(
   audio.onended = () => URL.revokeObjectURL(url);
   await audio.play();
 }
+
+export async function playAudioPath(path: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}${path}`);
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  audio.onended = () => URL.revokeObjectURL(url);
+  await audio.play();
+}

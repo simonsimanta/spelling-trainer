@@ -36,7 +36,7 @@ export const firstRunDashboard = {
     due_today_words: 19,
     forced_correction_words: 0,
     practice_queue_words: 0,
-    dictation_ready_words: 0,
+    dictation_ready_words: 5,
     diagnostic_ready_words: 19,
     diagnostic_tested_words: 0,
     diagnostic_missed_words: 0,
@@ -79,7 +79,7 @@ export const firstRunDashboard = {
     due_reviews: 0,
     mistake_words: 0,
     new_words: 19,
-    dictation_ready: 0
+    dictation_ready: 5
   }
 };
 
@@ -178,21 +178,98 @@ export const dictationSession = {
   session_type: "dictation",
   total_items: 1,
   completed_items: 0,
+  dictation_level: "sentence",
   items: [
     {
       session_item_id: 3,
-      word_id: 1,
-      term: "definitely",
+      word_id: null,
+      term: "Dictation",
       item_type: "sentence_dictation",
       mode: "dictation",
-      prompt_text: "I definitely finished the task.",
-      source_reason: "recent miss",
-      queue_reason: "recent miss",
+      prompt_text: "Listen to the complete text and type what you hear.",
+      source_reason: "reviewed built-in",
+      queue_reason: "reviewed built-in",
+      selection_score: 1,
+      score_breakdown: { target_count: 1 },
       status: "pending",
       audio_ready: true,
-      choices: null
+      choices: null,
+      dictation_level: "sentence",
+      segment_count: 1,
+      audio_url: "/spelling/dictation/items/3/audio"
     }
   ]
+};
+
+export const paragraphDictationSession = {
+  session_id: 4,
+  session_type: "dictation",
+  total_items: 1,
+  completed_items: 0,
+  dictation_level: "paragraph",
+  items: [
+    {
+      session_item_id: 4,
+      word_id: null,
+      term: "Dictation",
+      item_type: "paragraph_dictation",
+      mode: "dictation",
+      prompt_text: "Listen to the complete text and type what you hear.",
+      source_reason: "reviewed built-in",
+      queue_reason: "reviewed built-in",
+      selection_score: 5,
+      score_breakdown: { target_count: 5 },
+      status: "pending",
+      audio_ready: true,
+      choices: null,
+      dictation_level: "paragraph",
+      segment_count: 3,
+      audio_url: "/spelling/dictation/items/4/audio"
+    }
+  ]
+};
+
+export const dictationProgress = {
+  current_level: "sentence",
+  previous_level: null,
+  completed_sessions_at_level: 1,
+  promotion_sessions_required: 3,
+  step_down_sessions_required: 2,
+  updated_at: "2026-08-06T12:00:00Z"
+};
+
+export const dictationResult = {
+  submission_id: 10,
+  session_id: 3,
+  session_item_id: 3,
+  level: "sentence",
+  expected_text: "I will definitely check the address before posting the letter.",
+  attempt_text: "I will definately check the address before posting the letter",
+  sentence_segments: ["I will definitely check the address before posting the letter."],
+  word_error_rate: 0.1,
+  word_accuracy: 0.9,
+  target_accuracy: 0,
+  capitalization_accuracy: 1,
+  punctuation_accuracy: 0,
+  omissions: 0,
+  additions: 0,
+  substitutions: 1,
+  replay_count: 0,
+  word_operations: [],
+  targets: [
+    {
+      word_id: 1,
+      target: "definitely",
+      actual: "definately",
+      is_correct: false,
+      error_type: "substitution",
+      confidence: 0.9,
+      feeds_practice: true
+    }
+  ],
+  session_complete: true,
+  current_level: "sentence",
+  level_changed: false
 };
 
 export function dashboardWithStats(overrides: Partial<typeof firstRunDashboard.stats>) {

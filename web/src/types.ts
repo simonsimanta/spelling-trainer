@@ -238,7 +238,7 @@ export type DictationTextTarget = {
 export type DictationText = {
   id: number;
   title: string;
-  content: string;
+  content?: string | null;
   source_type: "curated" | "personal" | "ai_adapted";
   level: "sentence" | "passage" | "paragraph";
   locale: string;
@@ -249,6 +249,7 @@ export type DictationText = {
   allow_ai_adaptation: boolean;
   adapted_from_id?: number | null;
   targets: DictationTextTarget[];
+  target_count: number;
   use_count: number;
   last_used_at?: string | null;
   created_at: string;
@@ -286,6 +287,9 @@ export type SessionItem = {
   chunked_form?: string | null;
   phonetic_hint?: string | null;
   difficulty_score?: number | null;
+  dictation_level?: "sentence" | "passage" | "paragraph" | null;
+  segment_count: number;
+  audio_url?: string | null;
 };
 
 export type SpellingSession = {
@@ -293,7 +297,60 @@ export type SpellingSession = {
   session_type: string;
   total_items: number;
   completed_items: number;
+  dictation_level?: "sentence" | "passage" | "paragraph" | null;
   items: SessionItem[];
+};
+
+export type DictationProgress = {
+  current_level: "sentence" | "passage" | "paragraph";
+  previous_level?: "sentence" | "passage" | "paragraph" | null;
+  completed_sessions_at_level: number;
+  promotion_sessions_required: number;
+  step_down_sessions_required: number;
+  updated_at: string;
+};
+
+export type DictationWordOperation = {
+  operation: "equal" | "substitution" | "omission" | "addition";
+  expected?: string | null;
+  actual?: string | null;
+  expected_index?: number | null;
+  actual_index?: number | null;
+  confidence: number;
+};
+
+export type DictationTargetResult = {
+  word_id?: number | null;
+  target: string;
+  actual?: string | null;
+  is_correct: boolean;
+  error_type?: "substitution" | "omission" | null;
+  confidence: number;
+  feeds_practice: boolean;
+};
+
+export type DictationSubmissionResult = {
+  submission_id: number;
+  session_id: number;
+  session_item_id: number;
+  level: "sentence" | "passage" | "paragraph";
+  expected_text: string;
+  attempt_text: string;
+  sentence_segments: string[];
+  word_error_rate: number;
+  word_accuracy: number;
+  target_accuracy: number;
+  capitalization_accuracy: number;
+  punctuation_accuracy: number;
+  omissions: number;
+  additions: number;
+  substitutions: number;
+  replay_count: number;
+  word_operations: DictationWordOperation[];
+  targets: DictationTargetResult[];
+  session_complete: boolean;
+  current_level: "sentence" | "passage" | "paragraph";
+  level_changed: boolean;
 };
 
 export type AttemptResult = {

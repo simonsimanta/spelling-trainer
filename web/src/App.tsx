@@ -15,6 +15,7 @@ import { useEffect, useState } from "react";
 
 import { getJson, postJson } from "./api";
 import { AchievementsView } from "./features/AchievementsView";
+import { AdaptiveDictationView } from "./features/AdaptiveDictationView";
 import { DashboardView } from "./features/DashboardView";
 import { ExplorationView } from "./features/ExplorationView";
 import { PracticeView } from "./features/PracticeView";
@@ -171,7 +172,7 @@ export default function App() {
                 onInitialSessionConsumed={() => setWordPracticeSession(null)}
               />
             )}
-            {view === "dictation" && <PracticeView mode="dictation" dashboard={dashboard} onRefresh={refreshDashboard} onNavigate={setView} />}
+            {view === "dictation" && <AdaptiveDictationView dashboard={dashboard} onRefresh={refreshDashboard} onNavigate={setView} />}
             {view === "wordLists" && (
               <WordListsView
                 onPractice={startWordPractice}

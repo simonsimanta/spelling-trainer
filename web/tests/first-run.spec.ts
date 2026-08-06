@@ -1,6 +1,12 @@
 import { expect, test } from "@playwright/test";
 
-import { diagnosticSession, firstRunDashboard, readyEnvironment } from "./fixtures/app-data";
+import {
+  diagnosticSession,
+  dictationProgress,
+  firstRunDashboard,
+  paragraphDictationSession,
+  readyEnvironment
+} from "./fixtures/app-data";
 
 test("first-run dashboard exposes Diagnostic and starts a diagnostic session", async ({ page }) => {
   await page.route("**/dashboard", async (route) => {
@@ -390,85 +396,74 @@ test("audio failures show an actionable learner message", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("dictation feedback separates target spelling from sentence completeness", async ({ page }) => {
+test("paragraph dictation supports segment replay and layered results", async ({ page }) => {
+  await page.addInitScript(() => {
+    class MockAudio {
+      onended: (() => void) | null = null;
+      play() { return Promise.resolve(); }
+    }
+    Object.defineProperty(window, "Audio", { configurable: true, value: MockAudio });
+  });
   await page.route("**/dashboard", async (route) => {
     await route.fulfill({ json: firstRunDashboard });
   });
-
-  await page.route("**/spelling/sessions", async (route) => {
-    await route.fulfill({
-      json: {
-        session_id: 2,
-        session_type: "dictation",
-        total_items: 1,
-        completed_items: 0,
-        items: [
-          {
-            session_item_id: 2,
-            word_id: 1,
-            term: "definitely",
-            item_type: "sentence_dictation",
-            mode: "dictation",
-            prompt_text: "I definitely finished the task.",
-            source_reason: "recent miss",
-            queue_reason: "recent miss",
-            status: "pending",
-            audio_ready: true,
-            choices: null
-          }
-        ]
-      }
-    });
+  await page.route("**/spelling/dictation/progress", async (route) => {
+    await route.fulfill({ json: { ...dictationProgress, current_level: "paragraph" } });
   });
-
-  await page.route("**/spelling/attempts", async (route) => {
+  await page.route("**/spelling/dictation/texts**", async (route) => {
+    await route.fulfill({ json: { items: [], total: 0, counts: { sentence: 0, passage: 0, paragraph: 0, personal: 0 } } });
+  });
+  await page.route("**/spelling/sessions", async (route) => {
+    await route.fulfill({ json: paragraphDictationSession });
+  });
+  await page.route("**/spelling/dictation/items/4/audio**", async (route) => {
+    await route.fulfill({ body: "audio", contentType: "audio/mpeg" });
+  });
+  const expected = "Every Monday, I write a clear schedule. This discipline helps me stay focused. I record progress in a journal.";
+  await page.route("**/spelling/dictation/submissions", async (route) => {
     await route.fulfill({
       json: {
-        attempt_id: 7,
-        word_id: 1,
-        term: "definitely",
-        attempt_text: "definitely",
-        is_correct: true,
-        points_awarded: 3,
-        error_pattern: null,
-        next_due_date: "2026-07-31",
-        llm_feedback: "The target spelling is correct.",
-        chunk_hint: "de-fin-ite-ly",
-        mnemonic: "Think: de-fi-nite-ly.",
-        example_sentence: "I definitely finished the task.",
-        diff_json: null,
-        sentence_diff_json: {
-          expected: "I definitely finished the task.",
-          attempt: "definitely",
-          target_word: "definitely",
-          target_correct: true,
-          target_spelling_correct: true,
-          sentence_complete: false,
-          sentence_similarity: 0.3333,
-          operations: [{ type: "delete", expected: "i" }, { type: "delete", expected: "finished the task" }]
-        },
-        target_spelling_correct: true,
-        sentence_complete: false,
-        sentence_similarity: 0.3333,
-        forced_correction_required: false,
-        allow_next: true,
-        mastery_state: "review",
-        retry_prompt: null,
-        skip_available: false
+        submission_id: 11,
+        session_id: 4,
+        session_item_id: 4,
+        level: "paragraph",
+        expected_text: expected,
+        attempt_text: expected,
+        sentence_segments: expected.split(". "),
+        word_error_rate: 0,
+        word_accuracy: 1,
+        target_accuracy: 1,
+        capitalization_accuracy: 1,
+        punctuation_accuracy: 1,
+        omissions: 0,
+        additions: 0,
+        substitutions: 0,
+        replay_count: 2,
+        word_operations: [],
+        targets: [
+          { word_id: 1, target: "schedule", actual: "schedule", is_correct: true, error_type: null, confidence: 1, feeds_practice: false },
+          { word_id: 2, target: "discipline", actual: "discipline", is_correct: true, error_type: null, confidence: 1, feeds_practice: false }
+        ],
+        session_complete: true,
+        current_level: "paragraph",
+        level_changed: false
       }
     });
   });
 
   await page.goto("/");
   await page.getByRole("navigation").getByRole("button", { name: "Dictation" }).click();
-  await page.getByRole("button", { name: "Start Dictation" }).click();
-  await page.getByPlaceholder("Type the sentence here...").fill("definitely");
-  await page.getByRole("button", { name: "Submit" }).click();
+  await page.getByRole("button", { name: "Start paragraph" }).click();
+  await expect(page.getByText(expected)).toHaveCount(0);
+  await page.getByRole("button", { name: "Play complete text" }).click();
+  await page.getByRole("button", { name: "Play segment 1" }).click();
+  await expect(page.getByText("2 plays")).toBeVisible();
+  await page.getByPlaceholder("Type everything you hear...").fill(expected);
+  await page.getByRole("button", { name: "Check dictation" }).click();
 
-  const outcomes = page.getByLabel("Dictation results");
+  const outcomes = page.getByLabel("Dictation result");
   await expect(outcomes).toContainText("Target spelling");
-  await expect(outcomes).toContainText("Correct");
-  await expect(outcomes).toContainText("Sentence completeness");
-  await expect(outcomes).toContainText("33% match");
-  await expect(page.getByText("Target spelling correct. +3 points")).toBeVisible();
+  await expect(outcomes).toContainText("Capitalisation");
+  await expect(outcomes).toContainText("Punctuation");
+  await expect(outcomes).toContainText(expected);
 });

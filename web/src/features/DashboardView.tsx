@@ -183,7 +183,7 @@ export function DashboardView({
             { label: "Trouble", value: stats.trouble_words, tone: "orange" },
             { label: "Forced Correction", value: stats.forced_correction_words, tone: "red" },
             { label: "Review Debt", value: stats.review_debt_words, tone: "red" },
-            { label: "Dictation Ready", value: stats.dictation_ready_words, tone: "green" }
+            { label: "Reviewed Texts", value: stats.dictation_ready_words, tone: "green" }
           ]}
         />
       </div>

@@ -10,7 +10,17 @@ from sqlalchemy.orm import Session
 
 from app.backend import models, readiness, repository, schemas
 from app.backend.db import get_db
-from app.backend.spelling import analytics, attempts, audio, dictation_texts, oxford, sessions, suggestions, words
+from app.backend.spelling import (
+    analytics,
+    attempts,
+    audio,
+    dictation_grading,
+    dictation_texts,
+    oxford,
+    sessions,
+    suggestions,
+    words,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -292,6 +302,47 @@ def post_dictation_text_adaptation(
     except ValueError as error:
         status_code = 404 if "not found" in str(error).lower() else 400
         raise HTTPException(status_code=status_code, detail=str(error))
+
+
+@app.get("/spelling/dictation/progress", response_model=schemas.DictationProgressOut)
+def get_dictation_progress(db: Session = Depends(get_db)) -> schemas.DictationProgressOut:
+    return repository.get_dictation_progress(db)
+
+
+@app.post("/spelling/dictation/submissions", response_model=schemas.DictationSubmissionResult)
+def post_dictation_submission(
+    payload: schemas.DictationSubmissionCreate,
+    db: Session = Depends(get_db),
+) -> schemas.DictationSubmissionResult:
+    try:
+        return repository.submit_dictation_submission(db, payload)
+    except ValueError as error:
+        status_code = 409 if "already been submitted" in str(error) else 404
+        raise HTTPException(status_code=status_code, detail=str(error))
+
+
+@app.get("/spelling/dictation/items/{item_id}/audio")
+def get_dictation_item_audio(
+    item_id: int,
+    segment: Optional[int] = Query(default=None, ge=0),
+    db: Session = Depends(get_db),
+) -> Response:
+    item = db.get(models.SpellingSessionItem, item_id)
+    if not item or not item.dictation_text:
+        raise HTTPException(status_code=404, detail="Dictation item not found.")
+    spoken_text = item.dictation_text.content
+    if segment is not None:
+        segments = dictation_grading.split_sentence_segments(spoken_text)
+        if segment >= len(segments):
+            raise HTTPException(status_code=404, detail="Dictation segment not found.")
+        spoken_text = segments[segment]
+    settings = repository.get_settings(db)
+    return audio.get_audio_response(
+        spoken_text,
+        voice=settings.tts_voice,
+        model=settings.tts_model,
+        instructions=audio.pronunciation_instructions(spoken_text, None, "dictation"),
+    )
 
 
 @app.get("/spelling/exploration/next", response_model=schemas.ExplorationNextOut)

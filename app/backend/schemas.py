@@ -211,7 +211,7 @@ class DictationTextTargetRead(BaseModel):
 class DictationTextRead(BaseModel):
     id: int
     title: str
-    content: str
+    content: Optional[str] = None
     source_type: Literal["curated", "personal", "ai_adapted"]
     level: Literal["sentence", "passage", "paragraph"]
     locale: str
@@ -222,6 +222,7 @@ class DictationTextRead(BaseModel):
     allow_ai_adaptation: bool
     adapted_from_id: Optional[int] = None
     targets: List[DictationTextTargetRead] = Field(default_factory=list)
+    target_count: int = 0
     use_count: int = 0
     last_used_at: Optional[datetime] = None
     created_at: datetime
@@ -343,6 +344,9 @@ class SpellingSessionItemOut(BaseModel):
     chunked_form: Optional[str] = None
     phonetic_hint: Optional[str] = None
     difficulty_score: Optional[float] = None
+    dictation_level: Optional[Literal["sentence", "passage", "paragraph"]] = None
+    segment_count: int = 0
+    audio_url: Optional[str] = None
 
 
 class SpellingSessionOut(BaseModel):
@@ -350,7 +354,67 @@ class SpellingSessionOut(BaseModel):
     session_type: str
     total_items: int
     completed_items: int
+    dictation_level: Optional[Literal["sentence", "passage", "paragraph"]] = None
     items: List[SpellingSessionItemOut]
+
+
+class DictationProgressOut(BaseModel):
+    current_level: Literal["sentence", "passage", "paragraph"]
+    previous_level: Optional[Literal["sentence", "passage", "paragraph"]] = None
+    completed_sessions_at_level: int = 0
+    promotion_sessions_required: int = 3
+    step_down_sessions_required: int = 2
+    updated_at: datetime
+
+
+class DictationSubmissionCreate(BaseModel):
+    session_id: int
+    session_item_id: int
+    attempt_text: str = Field(min_length=1, max_length=10000)
+    replay_count: int = Field(default=0, ge=0, le=1000)
+
+
+class DictationWordOperationRead(BaseModel):
+    operation: Literal["equal", "substitution", "omission", "addition"]
+    expected: Optional[str] = None
+    actual: Optional[str] = None
+    expected_index: Optional[int] = None
+    actual_index: Optional[int] = None
+    confidence: float = 0.0
+
+
+class DictationTargetResultRead(BaseModel):
+    word_id: Optional[int] = None
+    target: str
+    actual: Optional[str] = None
+    is_correct: bool
+    error_type: Optional[Literal["substitution", "omission"]] = None
+    confidence: float = 0.0
+    feeds_practice: bool = False
+
+
+class DictationSubmissionResult(BaseModel):
+    submission_id: int
+    session_id: int
+    session_item_id: int
+    level: Literal["sentence", "passage", "paragraph"]
+    expected_text: str
+    attempt_text: str
+    sentence_segments: List[str] = Field(default_factory=list)
+    word_error_rate: float
+    word_accuracy: float
+    target_accuracy: float
+    capitalization_accuracy: float
+    punctuation_accuracy: float
+    omissions: int
+    additions: int
+    substitutions: int
+    replay_count: int
+    word_operations: List[DictationWordOperationRead] = Field(default_factory=list)
+    targets: List[DictationTargetResultRead] = Field(default_factory=list)
+    session_complete: bool = False
+    current_level: Literal["sentence", "passage", "paragraph"]
+    level_changed: bool = False
 
 
 class SpellingSuggestionRead(BaseModel):

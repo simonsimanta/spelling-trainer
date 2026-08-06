@@ -346,7 +346,9 @@ class SpellingSessionItemOut(BaseModel):
     difficulty_score: Optional[float] = None
     dictation_level: Optional[Literal["sentence", "passage", "paragraph"]] = None
     segment_count: int = 0
+    audio_asset_id: Optional[int] = None
     audio_url: Optional[str] = None
+    audio_segment_urls: List[str] = Field(default_factory=list)
 
 
 class SpellingSessionOut(BaseModel):
@@ -664,7 +666,7 @@ class SpellingAudioPreloadResponse(BaseModel):
 
 class SpellingAudioBulkGenerateRequest(BaseModel):
     limit: int = Field(default=100, ge=1, le=5000)
-    voice: str = Field(default="alloy", min_length=1, max_length=40)
+    voice: str = Field(default="cedar", min_length=1, max_length=40)
     model: str = Field(default="gpt-4o-mini-tts", min_length=1, max_length=80)
 
 
@@ -685,6 +687,28 @@ class SpellingAudioBulkStatus(BaseModel):
     failed: int
     voice: str
     model: str
+
+
+class SpellingAudioAssetResolveRequest(BaseModel):
+    word_id: Optional[int] = Field(default=None, ge=1)
+    session_item_id: Optional[int] = Field(default=None, ge=1)
+    segment_index: Optional[int] = Field(default=None, ge=0)
+    force: bool = False
+
+
+class SpellingAudioAssetRead(BaseModel):
+    asset_id: int
+    url: str
+    status: str
+    kind: str
+    ready: bool
+
+
+class SpellingAudioCleanupResult(BaseModel):
+    expired: int
+    evicted: int
+    bytes_removed: int
+    retained_bytes: int
 
 
 class SpellingCostOverview(BaseModel):

@@ -135,6 +135,16 @@ p {
   min-width: 0;
 }
 
+.ai-voice-disclosure {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 0.78rem;
+  gap: 7px;
+  justify-content: flex-end;
+  margin: 18px 4px 0;
+}
+
 .page-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

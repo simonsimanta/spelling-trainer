@@ -289,7 +289,9 @@ export type SessionItem = {
   difficulty_score?: number | null;
   dictation_level?: "sentence" | "passage" | "paragraph" | null;
   segment_count: number;
+  audio_asset_id?: number | null;
   audio_url?: string | null;
+  audio_segment_urls: string[];
 };
 
 export type SpellingSession = {

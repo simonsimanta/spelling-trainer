@@ -52,41 +52,48 @@ export async function deleteJson(path: string): Promise<void> {
   }
 }
 
-export async function playAudio(
-  text: string,
-  variant?: {
-    voice?: string;
-    model?: string;
-    wordId?: number;
-    mode?: "word" | "dictation";
-    force?: boolean;
-  }
-): Promise<void> {
-  const params = new URLSearchParams({ text });
-  if (variant?.voice) params.set("voice", variant.voice);
-  if (variant?.model) params.set("model", variant.model);
-  if (variant?.wordId) params.set("word_id", String(variant.wordId));
-  if (variant?.mode) params.set("mode", variant.mode);
-  if (variant?.force) params.set("force", "true");
-  const response = await fetch(`${API_BASE_URL}/spelling/audio?${params.toString()}`);
-  if (!response.ok) {
-    throw new Error(await responseErrorMessage(response));
-  }
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  const audio = new Audio(url);
-  audio.onended = () => URL.revokeObjectURL(url);
-  await audio.play();
+type AudioAsset = {
+  asset_id: number;
+  url: string;
+  status: string;
+  kind: string;
+  ready: boolean;
+};
+
+function audioUrl(path: string): string {
+  return path.startsWith("http://") || path.startsWith("https://")
+    ? path
+    : `${API_BASE_URL}${path}`;
+}
+
+export async function resolveWordAudio(wordId: number, force = false): Promise<AudioAsset> {
+  return postJson<AudioAsset>("/spelling/audio/assets/resolve", {
+    word_id: wordId,
+    force
+  });
+}
+
+export async function playWordAudio(wordId: number, force = false): Promise<void> {
+  const asset = await resolveWordAudio(wordId, force);
+  await playAudioPath(asset.url);
 }
 
 export async function playAudioPath(path: string): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}${path}`);
-  if (!response.ok) {
-    throw new Error(await responseErrorMessage(response));
+  const audio = new Audio(audioUrl(path));
+  try {
+    await audio.play();
+  } catch {
+    throw new Error("Audio could not be streamed. Check the backend connection and try again.");
   }
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  const audio = new Audio(url);
-  audio.onended = () => URL.revokeObjectURL(url);
-  await audio.play();
+}
+
+export async function prefetchAudioPaths(paths: Array<string | null | undefined>): Promise<void> {
+  const unique = [...new Set(paths.filter((path): path is string => Boolean(path)))];
+  await Promise.allSettled(
+    unique.map(async (path) => {
+      const response = await fetch(audioUrl(path), { cache: "force-cache" });
+      if (!response.ok) throw new Error(await responseErrorMessage(response));
+      await response.arrayBuffer();
+    })
+  );
 }

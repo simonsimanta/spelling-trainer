@@ -15,7 +15,7 @@ import {
   useState
 } from "react";
 
-import { getJson, playAudio, postJson } from "../api";
+import { getJson, playWordAudio, postJson } from "../api";
 import type {
   AttemptResult,
   Dashboard,
@@ -76,7 +76,7 @@ export function ExplorationView({
   async function playCurrentWord() {
     if (!data) return;
     try {
-      await playAudio(data.word.term, { wordId: data.word.id, mode: "word" });
+      await playWordAudio(data.word.id);
       setAudioError(null);
     } catch (err) {
       setAudioError(err instanceof Error ? err.message : "Unable to play audio");

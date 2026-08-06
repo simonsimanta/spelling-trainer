@@ -100,6 +100,9 @@ export const diagnosticSession = {
       queue_reason: "starter diagnostic",
       status: "pending",
       audio_ready: true,
+      audio_asset_id: 1,
+      audio_url: "/spelling/audio/assets/1",
+      audio_segment_urls: [],
       choices: null,
       short_meaning: "Without doubt; clearly and certainly.",
       part_of_speech: "adverb",
@@ -166,6 +169,9 @@ export const practiceSession = {
       queue_reason: "recent miss",
       status: "pending",
       audio_ready: true,
+      audio_asset_id: 2,
+      audio_url: "/spelling/audio/assets/2",
+      audio_segment_urls: [],
       choices: null,
       short_meaning: "Without doubt; clearly and certainly.",
       part_of_speech: "adverb"
@@ -196,7 +202,9 @@ export const dictationSession = {
       choices: null,
       dictation_level: "sentence",
       segment_count: 1,
-      audio_url: "/spelling/dictation/items/3/audio"
+      audio_asset_id: 3,
+      audio_url: "/spelling/audio/assets/3",
+      audio_segment_urls: ["/spelling/audio/assets/31"]
     }
   ]
 };
@@ -224,7 +232,13 @@ export const paragraphDictationSession = {
       choices: null,
       dictation_level: "paragraph",
       segment_count: 3,
-      audio_url: "/spelling/dictation/items/4/audio"
+      audio_asset_id: 4,
+      audio_url: "/spelling/audio/assets/4",
+      audio_segment_urls: [
+        "/spelling/audio/assets/41",
+        "/spelling/audio/assets/42",
+        "/spelling/audio/assets/43"
+      ]
     }
   ]
 };

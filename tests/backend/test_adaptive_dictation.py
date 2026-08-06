@@ -5,7 +5,6 @@ import sqlite3
 import subprocess
 import sys
 
-from fastapi import Response
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -108,7 +107,9 @@ def test_adaptive_session_hides_expected_text_until_submission() -> None:
     assert item["term"] == "Dictation"
     assert item["prompt_text"] == "Listen to the complete text and type what you hear."
     assert item["segment_count"] == 1
-    assert item["audio_url"].endswith(f"/{item['session_item_id']}/audio")
+    assert item["audio_asset_id"] is not None
+    assert item["audio_url"] == f"/spelling/audio/assets/{item['audio_asset_id']}"
+    assert len(item["audio_segment_urls"]) == item["segment_count"]
     assert "expected_text" not in item
     assert "targets" not in item
 
@@ -201,7 +202,7 @@ def test_progress_promotes_after_three_strong_sessions_and_steps_down_after_two_
     assert response.json()["current_level"] == "sentence"
 
 
-def test_paragraph_audio_supports_complete_text_and_sentence_segments(monkeypatch) -> None:
+def test_paragraph_audio_supports_complete_text_and_sentence_segments(monkeypatch, tmp_path) -> None:
     _seed()
     with SessionLocal() as db:
         progress = repository._ensure_dictation_progress(db)
@@ -214,14 +215,31 @@ def test_paragraph_audio_supports_complete_text_and_sentence_segments(monkeypatc
     segments = dictation_grading.split_sentence_segments(expected)
     spoken: list[str] = []
 
-    def fake_audio(text: str, **_kwargs) -> Response:
-        spoken.append(text)
-        return Response(content=b"audio", media_type="audio/mpeg")
+    class FakeStream:
+        status_code = 200
 
-    monkeypatch.setattr("app.backend.api.audio.get_audio_response", fake_audio)
+        def __init__(self, text: str):
+            self.text = text
+
+        def iter_content(self, chunk_size: int):
+            del chunk_size
+            yield b"audio"
+
+        def close(self):
+            return None
+
+    def fake_stream(spec):
+        spoken.append(spec.text)
+        return FakeStream(spec.text)
+
+    monkeypatch.setattr("app.backend.spelling.audio.audio_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr("app.backend.spelling.audio._open_tts_stream", fake_stream)
     complete = client.get(item["audio_url"])
-    first_segment = client.get(item["audio_url"], params={"segment": 0})
-    missing_segment = client.get(item["audio_url"], params={"segment": len(segments)})
+    first_segment = client.get(item["audio_segment_urls"][0])
+    missing_segment = client.post(
+        "/spelling/audio/assets/resolve",
+        json={"session_item_id": item["session_item_id"], "segment_index": len(segments)},
+    )
 
     assert complete.status_code == 200
     assert first_segment.status_code == 200

@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 
-import { getJson, patchJson, playAudio, postJson } from "../api";
+import { getJson, patchJson, playWordAudio, postJson } from "../api";
 import type {
   ManagedWord,
   SpellingSuggestion,
@@ -260,7 +260,7 @@ export function WordListsView({
       setReviewError(null);
       setListError(null);
       if (testAudio) {
-        await playAudio(reviewing.term, { wordId: reviewing.id, mode: "word", force: true });
+        await playWordAudio(reviewing.id, true);
       } else {
         closeContentReview();
       }

@@ -27,6 +27,19 @@ def _seed() -> None:
         db.close()
 
 
+def test_dictation_text_model_declares_selection_index() -> None:
+    indexes = {
+        index.name: tuple(column.name for column in index.columns)
+        for index in models.SpellingDictationText.__table__.indexes
+    }
+
+    assert indexes["ix_spelling_dictation_texts_level_status_last_used"] == (
+        "level",
+        "status",
+        "last_used_at",
+    )
+
+
 def test_curated_library_seeds_five_reviewed_texts_per_level() -> None:
     _seed()
     db = SessionLocal()

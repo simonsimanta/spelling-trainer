@@ -9,6 +9,7 @@ from sqlalchemy import (
     Enum as SAEnum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -185,6 +186,12 @@ class SpellingDictationText(Base):
     __table_args__ = (
         UniqueConstraint("content_hash", name="uq_spelling_dictation_text_content_hash"),
         UniqueConstraint("adaptation_key", name="uq_spelling_dictation_text_adaptation_key"),
+        Index(
+            "ix_spelling_dictation_texts_level_status_last_used",
+            "level",
+            "status",
+            "last_used_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)

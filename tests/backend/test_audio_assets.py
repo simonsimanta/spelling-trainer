@@ -11,7 +11,7 @@ import threading
 import time
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.backend import models, repository, schemas
 from app.backend.api import app
@@ -114,6 +114,28 @@ def test_sessions_and_word_resolution_return_only_opaque_asset_urls() -> None:
         assert not hasattr(asset, "text")
         assert asset.locale == "en-GB"
         assert asset.pronunciation_version == audio.PRONUNCIATION_VERSION
+
+
+def test_session_audio_metadata_is_loaded_in_one_batch() -> None:
+    _seed()
+    statements: list[str] = []
+
+    def capture_statement(_connection, _cursor, statement, _parameters, _context, _executemany):
+        if "spelling_audio_assets" in statement and statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture_statement)
+    try:
+        response = TestClient(app).post(
+            "/spelling/sessions",
+            json={"session_type": "diagnostic", "target_size": 12, "exercise_type": "mixed"},
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_statement)
+
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 12
+    assert len(statements) == 1
 
 
 def test_audio_stream_is_atomic_cacheable_and_reused(monkeypatch, tmp_path) -> None:

@@ -236,6 +236,16 @@ def _fallback_analysis(correct_word: str, attempt_text: str, deterministic: dict
     }
 
 
+def immediate_analysis(correct_word: str, attempt_text: str) -> dict[str, Any]:
+    deterministic = deterministic_analysis(correct_word, attempt_text)
+    return _fallback_analysis(
+        correct_word,
+        attempt_text,
+        deterministic,
+        "Detailed AI analysis is being prepared in the background.",
+    )
+
+
 def structured_output_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -431,10 +441,23 @@ def validate_transfer_candidates(
     source_word: models.SpellingWord,
     analysis: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    existing_terms = set(db.scalars(select(models.SpellingWord.term).where(models.SpellingWord.is_active.is_(True))).all())
-    trusted = existing_terms | set(oxford_terms())
     source_term = normalize_word(source_word.term)
     pattern = analysis["primary_pattern"]
+    candidate_terms = {
+        normalize_word(str(candidate.get("term", "")))
+        for candidate in analysis.get("transfer_words", [])[:5]
+    }
+    candidate_terms.discard("")
+    existing_terms = set(
+        db.scalars(
+            select(models.SpellingWord.term).where(
+                models.SpellingWord.is_active.is_(True),
+                models.SpellingWord.term.in_(candidate_terms),
+            )
+        ).all()
+    )
+    missing_terms = candidate_terms - existing_terms
+    trusted = existing_terms | (missing_terms & set(oxford_terms()) if missing_terms else set())
     validated: list[dict[str, Any]] = []
     seen: set[str] = set()
     for candidate in analysis.get("transfer_words", []):
@@ -472,21 +495,32 @@ def persist_analysis(
 ) -> dict[str, Any]:
     validated = validate_transfer_candidates(db, source_word, analysis)
     public_analysis = {**analysis, "transfer_words": validated, "prompt_version": PROMPT_VERSION}
-    db.add(
-        models.SpellingErrorAnalysis(
-            attempt_id=attempt.id,
-            primary_pattern=analysis["primary_pattern"],
-            secondary_patterns=analysis.get("secondary_patterns", []),
-            edit_operations=analysis.get("edit_operations", []),
-            explanation=analysis["explanation"],
-            memory_strategy=analysis["memory_strategy"],
-            confidence=float(analysis.get("confidence", 0.0)),
-            analysis_source=analysis.get("analysis_source", "fallback"),
-            model=model if analysis.get("analysis_source") == "ai" else "",
-            prompt_version=PROMPT_VERSION,
-            locale=locale,
+    stored_analysis = db.scalar(
+        select(models.SpellingErrorAnalysis).where(
+            models.SpellingErrorAnalysis.attempt_id == attempt.id
         )
     )
+    values = {
+        "primary_pattern": analysis["primary_pattern"],
+        "secondary_patterns": analysis.get("secondary_patterns", []),
+        "edit_operations": analysis.get("edit_operations", []),
+        "explanation": analysis["explanation"],
+        "memory_strategy": analysis["memory_strategy"],
+        "confidence": float(analysis.get("confidence", 0.0)),
+        "analysis_source": analysis.get("analysis_source", "fallback"),
+        "model": model if analysis.get("analysis_source") == "ai" else "",
+        "prompt_version": PROMPT_VERSION,
+        "locale": locale,
+    }
+    if stored_analysis is None:
+        stored_analysis = models.SpellingErrorAnalysis(
+            attempt_id=attempt.id,
+            **values,
+        )
+        db.add(stored_analysis)
+    else:
+        for field, value in values.items():
+            setattr(stored_analysis, field, value)
 
     for candidate in validated:
         related_word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == candidate["term"]))
@@ -543,6 +577,36 @@ def persist_analysis(
             )
             suggestion.evidence_count += 1
     return public_analysis
+
+
+def enrich_attempt_analysis(db: Session, attempt_id: int) -> bool:
+    attempt = db.get(models.SpellingAttempt, attempt_id)
+    if attempt is None or attempt.is_correct or attempt.mode == models.SpellingMode.dictation:
+        return False
+    word = db.get(models.SpellingWord, attempt.word_id)
+    settings = db.get(models.AppSettings, 1)
+    if word is None or settings is None or not settings.ai_generation_enabled:
+        return False
+    analysis = cached_analysis(
+        db,
+        word,
+        attempt.attempt_text,
+        model=settings.ai_model,
+        locale=settings.english_variant,
+        enabled=True,
+    )
+    public_analysis = persist_analysis(
+        db,
+        attempt,
+        word,
+        analysis,
+        model=settings.ai_model,
+        locale=settings.english_variant,
+    )
+    attempt.error_pattern = public_analysis["primary_pattern"]
+    attempt.llm_feedback = feedback_text(public_analysis)
+    db.commit()
+    return public_analysis.get("analysis_source") == "ai"
 
 
 def feedback_text(analysis: dict[str, Any]) -> str:

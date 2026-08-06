@@ -16,12 +16,10 @@ Dedicated spelling trainer with a FastAPI backend, React/Vite frontend, SQLite o
    - `pip install -r requirements.txt`
 2. Copy env file:
    - `cp .env.example .env`
-3. Apply database migrations:
-   - `python -m alembic upgrade head`
-4. Install frontend dependencies:
+3. Install frontend dependencies:
    - `cd web`
    - `npm install`
-5. Start both apps from the repo root:
+4. Start both apps from the repo root:
    - `./start_local.sh`
 
 Backend runs on `http://127.0.0.1:8000`.
@@ -36,7 +34,15 @@ export VITE_API_BASE_URL=http://127.0.0.1:8000
 
 ## Database And Environment Readiness
 
-The backend reads `DATABASE_URL` when it starts. Change only `.env`, apply migrations, and restart the backend when switching databases.
+`./start_local.sh` creates, migrates, and uses `data/spelling_trial.db` by default. This local database avoids internet round trips during practice and persists between restarts. A Supabase URL in `.env` remains untouched for deployment and backup work.
+
+Set `APP_DATABASE_URL` to override the database for a single local run:
+
+```bash
+APP_DATABASE_URL=sqlite:///./data/another.db ./start_local.sh
+```
+
+Commands that do not set `APP_DATABASE_URL` continue to read `DATABASE_URL` from `.env`.
 
 Local SQLite:
 
@@ -52,7 +58,7 @@ Supabase PostgreSQL:
 4. Put the complete URI in `.env` as `DATABASE_URL`. Do not commit it.
 5. Run `python -m alembic upgrade head`, then restart the backend.
 
-Switch back to local storage by restoring the SQLite `DATABASE_URL`, running the same migration command, and restarting. No source-code changes are required.
+To run the local app directly against Supabase, set `APP_DATABASE_URL` to the Supabase URI before starting it. The local trial database and Supabase are independent; this release does not automatically synchronise attempts between them.
 
 Diagnostic endpoints:
 
@@ -63,7 +69,7 @@ Diagnostic endpoints:
 Supabase transaction pooler connections on port `6543` are intended for short-lived/serverless workloads and do not support prepared statements. Prefer the connection string recommended by the Supabase dashboard for the backend's runtime.
 
 ## Oxford Words And Audio
-- Load Oxford words with `python scripts/load_oxford_core5k.py`.
+- Load Oxford words with `python -m scripts.load_oxford_core5k`.
 - Generate cached AI word content from Settings in the app or `POST /spelling/content/bulk-generate`.
 - Generate OpenAI TTS audio from Settings in the app or `POST /spelling/audio/bulk-generate`.
 - The default development bulk limit is 100 words per run.

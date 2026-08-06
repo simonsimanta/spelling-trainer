@@ -308,27 +308,9 @@ def _atomic_write(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def ensure_audio_asset(db: Session, spec: AudioSpec) -> models.SpellingAudioAsset:
-    fingerprint = spec.fingerprint
-    asset = db.scalar(
-        select(models.SpellingAudioAsset).where(
-            models.SpellingAudioAsset.fingerprint == fingerprint
-        )
-    )
-    if asset:
-        if asset.word_id is None and spec.word_id is not None:
-            asset.word_id = spec.word_id
-        if asset.dictation_text_id is None and spec.dictation_text_id is not None:
-            asset.dictation_text_id = spec.dictation_text_id
-        if asset.session_item_id is None and spec.session_item_id is not None:
-            asset.session_item_id = spec.session_item_id
-        if asset.status == "expired":
-            asset.status = "pending"
-            asset.updated_at = datetime.utcnow()
-        return asset
-
-    asset = models.SpellingAudioAsset(
-        fingerprint=fingerprint,
+def _asset_from_spec(spec: AudioSpec) -> models.SpellingAudioAsset:
+    return models.SpellingAudioAsset(
+        fingerprint=spec.fingerprint,
         asset_kind=spec.asset_kind,
         word_id=spec.word_id,
         dictation_text_id=spec.dictation_text_id,
@@ -344,21 +326,64 @@ def ensure_audio_asset(db: Session, spec: AudioSpec) -> models.SpellingAudioAsse
         instructions_hash=_sha256(spec.instructions),
         pronunciation_version=spec.pronunciation_version,
         status="pending",
-        file_path=f"{fingerprint}.{spec.audio_format}",
+        file_path=f"{spec.fingerprint}.{spec.audio_format}",
     )
-    try:
-        with db.begin_nested():
-            db.add(asset)
-            db.flush()
-    except IntegrityError:
-        asset = db.scalar(
-            select(models.SpellingAudioAsset).where(
-                models.SpellingAudioAsset.fingerprint == fingerprint
-            )
-        )
-        if asset is None:
-            raise
-    return asset
+
+
+def _update_asset_links(asset: models.SpellingAudioAsset, spec: AudioSpec) -> None:
+    if asset.word_id is None and spec.word_id is not None:
+        asset.word_id = spec.word_id
+    if asset.dictation_text_id is None and spec.dictation_text_id is not None:
+        asset.dictation_text_id = spec.dictation_text_id
+    if asset.session_item_id is None and spec.session_item_id is not None:
+        asset.session_item_id = spec.session_item_id
+    if asset.status == "expired":
+        asset.status = "pending"
+        asset.updated_at = datetime.utcnow()
+
+
+def ensure_audio_assets(db: Session, specs: list[AudioSpec]) -> list[models.SpellingAudioAsset]:
+    if not specs:
+        return []
+    unique_specs = {spec.fingerprint: spec for spec in specs}
+    fingerprints = list(unique_specs)
+    assets_by_fingerprint: dict[str, models.SpellingAudioAsset] = {}
+
+    for _ in range(3):
+        assets_by_fingerprint = {
+            asset.fingerprint: asset
+            for asset in db.scalars(
+                select(models.SpellingAudioAsset).where(
+                    models.SpellingAudioAsset.fingerprint.in_(fingerprints)
+                )
+            ).all()
+        }
+        missing = [
+            spec
+            for fingerprint, spec in unique_specs.items()
+            if fingerprint not in assets_by_fingerprint
+        ]
+        if not missing:
+            break
+        created = [_asset_from_spec(spec) for spec in missing]
+        try:
+            with db.begin_nested():
+                db.add_all(created)
+                db.flush()
+        except IntegrityError:
+            continue
+        assets_by_fingerprint.update({asset.fingerprint: asset for asset in created})
+        break
+
+    if set(fingerprints) - set(assets_by_fingerprint):
+        raise RuntimeError("Audio asset metadata could not be prepared after concurrent inserts.")
+    for fingerprint, spec in unique_specs.items():
+        _update_asset_links(assets_by_fingerprint[fingerprint], spec)
+    return [assets_by_fingerprint[spec.fingerprint] for spec in specs]
+
+
+def ensure_audio_asset(db: Session, spec: AudioSpec) -> models.SpellingAudioAsset:
+    return ensure_audio_assets(db, [spec])[0]
 
 
 def _word_spec(
@@ -380,6 +405,68 @@ def _word_spec(
     )
 
 
+def _session_item_audio_specs(
+    item: models.SpellingSessionItem,
+    *,
+    voice: str,
+    model: str,
+) -> tuple[AudioSpec, list[AudioSpec]]:
+    from app.backend.spelling import dictation_grading
+
+    if item.dictation_text_id and item.dictation_text:
+        text = item.dictation_text
+        complete = _spec(
+            text.content,
+            asset_kind="dictation_complete",
+            mode="dictation",
+            voice=voice,
+            model=model,
+            dictation_text_id=text.id,
+            session_item_id=item.id,
+            locale=text.locale,
+        )
+        segment_assets = [
+            _spec(
+                segment,
+                asset_kind="dictation_segment",
+                mode="dictation",
+                voice=voice,
+                model=model,
+                dictation_text_id=text.id,
+                session_item_id=item.id,
+                segment_index=index,
+                locale=text.locale,
+            )
+            for index, segment in enumerate(dictation_grading.split_sentence_segments(text.content))
+        ]
+        return complete, segment_assets
+
+    if item.session and item.session.session_type == models.SpellingSessionType.dictation:
+        complete = _spec(
+            item.prompt_text,
+            asset_kind="dictation_complete",
+            mode="dictation",
+            voice=voice,
+            model=model,
+            word=item.word,
+            word_id=item.word_id,
+            session_item_id=item.id,
+        )
+        return complete, []
+
+    if item.word:
+        return _word_spec(item.word, voice=voice, model=model, session_item_id=item.id), []
+
+    return _spec(
+        item.prompt_text,
+        asset_kind="session_prompt",
+        mode="word",
+        voice=voice,
+        model=model,
+        session_item_id=item.id,
+    ), []
+
+
 def session_item_audio_assets(
     db: Session,
     item: models.SpellingSessionItem,
@@ -387,75 +474,36 @@ def session_item_audio_assets(
     voice: str,
     model: str,
 ) -> tuple[models.SpellingAudioAsset, list[models.SpellingAudioAsset]]:
-    from app.backend.spelling import dictation_grading
+    complete_spec, segment_specs = _session_item_audio_specs(item, voice=voice, model=model)
+    assets = ensure_audio_assets(db, [complete_spec, *segment_specs])
+    return assets[0], assets[1:]
 
-    if item.dictation_text_id and item.dictation_text:
-        text = item.dictation_text
-        complete = ensure_audio_asset(
-            db,
-            _spec(
-                text.content,
-                asset_kind="dictation_complete",
-                mode="dictation",
-                voice=voice,
-                model=model,
-                dictation_text_id=text.id,
-                session_item_id=item.id,
-                locale=text.locale,
-            ),
+
+def prepare_session_audio_assets(
+    db: Session,
+    items: list[models.SpellingSessionItem],
+    *,
+    voice: str,
+    model: str,
+) -> dict[int, tuple[models.SpellingAudioAsset, list[models.SpellingAudioAsset]]]:
+    specs_by_item = {
+        item.id: _session_item_audio_specs(item, voice=voice, model=model)
+        for item in items
+    }
+    all_specs = [
+        spec
+        for complete, segments in specs_by_item.values()
+        for spec in [complete, *segments]
+    ]
+    assets = ensure_audio_assets(db, all_specs)
+    assets_by_fingerprint = {asset.fingerprint: asset for asset in assets}
+    return {
+        item_id: (
+            assets_by_fingerprint[complete.fingerprint],
+            [assets_by_fingerprint[segment.fingerprint] for segment in segments],
         )
-        segment_assets = [
-            ensure_audio_asset(
-                db,
-                _spec(
-                    segment,
-                    asset_kind="dictation_segment",
-                    mode="dictation",
-                    voice=voice,
-                    model=model,
-                    dictation_text_id=text.id,
-                    session_item_id=item.id,
-                    segment_index=index,
-                    locale=text.locale,
-                ),
-            )
-            for index, segment in enumerate(dictation_grading.split_sentence_segments(text.content))
-        ]
-        return complete, segment_assets
-
-    if item.session and item.session.session_type == models.SpellingSessionType.dictation:
-        complete = ensure_audio_asset(
-            db,
-            _spec(
-                item.prompt_text,
-                asset_kind="dictation_complete",
-                mode="dictation",
-                voice=voice,
-                model=model,
-                word=item.word,
-                word_id=item.word_id,
-                session_item_id=item.id,
-            ),
-        )
-        return complete, []
-
-    if item.word:
-        return ensure_audio_asset(
-            db,
-            _word_spec(item.word, voice=voice, model=model, session_item_id=item.id),
-        ), []
-
-    return ensure_audio_asset(
-        db,
-        _spec(
-            item.prompt_text,
-            asset_kind="session_prompt",
-            mode="word",
-            voice=voice,
-            model=model,
-            session_item_id=item.id,
-        ),
-    ), []
+        for item_id, (complete, segments) in specs_by_item.items()
+    }
 
 
 def asset_url(asset: models.SpellingAudioAsset, *, force: bool = False) -> str:

@@ -16,7 +16,7 @@ from sqlalchemy.exc import OperationalError
 from app.backend import models, readiness, repository, schemas
 from app.backend.api import app, startup_seed
 from app.backend.db import Base, SessionLocal, engine, get_db
-from app.backend.spelling import audio, error_analysis, oxford
+from app.backend.spelling import attempts, audio, error_analysis, oxford
 
 
 def _client() -> TestClient:
@@ -1704,13 +1704,18 @@ def test_structured_ai_analysis_is_cached_for_repeated_miss(monkeypatch: pytest.
     finally:
         db.close()
 
+    attempt_ids = []
     for _ in range(2):
         response = client.post(
             "/spelling/attempts",
             json={"word_id": word_id, "attempt_text": "necesary", "mode": "diagnostic"},
         )
         assert response.status_code == 200
-        assert response.json()["error_analysis"]["analysis_source"] == "ai"
+        payload = response.json()
+        attempt_ids.append(payload["attempt_id"])
+        assert payload["error_analysis"]["analysis_source"] == "fallback"
+        assert "background" in payload["error_analysis"]["fallback_reason"]
+    attempts.wait_for_enrichment()
     assert calls == 1
 
     db = SessionLocal()
@@ -1724,6 +1729,42 @@ def test_structured_ai_analysis_is_cached_for_repeated_miss(monkeypatch: pytest.
         assert cache is not None
         assert cache.hit_count == 1
         assert cache.prompt_version == error_analysis.PROMPT_VERSION
+        stored_sources = list(
+            db.scalars(
+                select(models.SpellingErrorAnalysis.analysis_source).where(
+                    models.SpellingErrorAnalysis.attempt_id.in_(attempt_ids)
+                )
+            ).all()
+        )
+        assert stored_sources == ["ai", "ai"]
+    finally:
+        db.close()
+
+
+def test_deferred_analysis_returns_without_calling_ai(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_core_words()
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def unexpected_post(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Deferred grading must not call OpenAI before returning")
+
+    monkeypatch.setattr(error_analysis.requests, "post", unexpected_post)
+    db = SessionLocal()
+    try:
+        word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "necessary"))
+        assert word is not None
+        result = repository.submit_spelling_attempt(
+            db,
+            schemas.SpellingAttemptCreate(
+                word_id=word.id,
+                attempt_text="necesary",
+                mode="diagnostic",
+            ),
+            defer_ai=True,
+        )
+        assert result.error_analysis is not None
+        assert result.error_analysis["analysis_source"] == "fallback"
+        assert "background" in result.error_analysis["fallback_reason"]
     finally:
         db.close()
 

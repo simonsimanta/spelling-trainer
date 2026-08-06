@@ -87,13 +87,13 @@ export async function playAudioPath(path: string): Promise<void> {
   }
 }
 
+export async function prefetchAudioPath(path: string): Promise<void> {
+  const response = await fetch(audioUrl(path), { cache: "force-cache" });
+  if (!response.ok) throw new Error(await responseErrorMessage(response));
+  await response.arrayBuffer();
+}
+
 export async function prefetchAudioPaths(paths: Array<string | null | undefined>): Promise<void> {
   const unique = [...new Set(paths.filter((path): path is string => Boolean(path)))];
-  await Promise.allSettled(
-    unique.map(async (path) => {
-      const response = await fetch(audioUrl(path), { cache: "force-cache" });
-      if (!response.ok) throw new Error(await responseErrorMessage(response));
-      await response.arrayBuffer();
-    })
-  );
+  await Promise.allSettled(unique.map(prefetchAudioPath));
 }

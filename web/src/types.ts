@@ -222,6 +222,7 @@ export type Exploration = {
   word: Word;
   content: WordContent;
   pool: "oxford" | "suggested" | "mixed";
+  source_reason?: string | null;
   previous_word_id?: number | null;
   next_word_id?: number | null;
   progress_index: number;

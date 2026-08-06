@@ -642,23 +642,22 @@ def _word_usefulness_score(word: models.SpellingWord) -> float:
 
 
 def _inferred_pattern_codes(word: models.SpellingWord) -> set[str]:
-    codes: set[str] = set()
-    term = word.term.lower()
-    if "ie" in term or "ei" in term:
-        codes.add("ie_ei_confusion")
-    if any(left == right for left, right in zip(term, term[1:])):
-        codes.add("double_consonant")
-    return codes
+    return error_analysis.word_pattern_codes(word.term)
 
 
 def _selection_signal_maps(
     db: Session,
     words: List[models.SpellingWord],
     as_of: date,
-) -> Tuple[Dict[int, models.SpellingReview], Dict[int, int], Dict[int, float]]:
+) -> Tuple[
+    Dict[int, models.SpellingReview],
+    Dict[int, int],
+    Dict[int, float],
+    Dict[int, float],
+]:
     word_ids = [word.id for word in words]
     if not word_ids:
-        return {}, {}, {}
+        return {}, {}, {}, {}
 
     reviews = {
         review.word_id: review
@@ -679,15 +678,35 @@ def _selection_signal_maps(
     recent_misses = {word_id: int(count or 0) for word_id, count in recent_miss_rows}
 
     pattern_rates = {
-        code: float(error_rate or 0.0)
-        for code, error_rate in db.execute(
-            select(models.SpellingPattern.code, models.SpellingUserPatternStat.recent_error_rate)
+        code: float(error_rate or 0.0) * min(float(total_attempts or 0) / 5.0, 1.0)
+        for code, error_rate, total_attempts in db.execute(
+            select(
+                models.SpellingPattern.code,
+                models.SpellingUserPatternStat.recent_error_rate,
+                models.SpellingUserPatternStat.total_attempts,
+            )
             .join(
                 models.SpellingUserPatternStat,
                 models.SpellingUserPatternStat.pattern_id == models.SpellingPattern.id,
             )
         ).all()
     }
+    recent_pattern_evidence: Dict[str, float] = {}
+    analysis_cutoff = datetime.combine(as_of - timedelta(days=30), datetime.min.time())
+    for primary, secondary, created_at in db.execute(
+        select(
+            models.SpellingErrorAnalysis.primary_pattern,
+            models.SpellingErrorAnalysis.secondary_patterns,
+            models.SpellingErrorAnalysis.created_at,
+        ).where(models.SpellingErrorAnalysis.created_at >= analysis_cutoff)
+    ).all():
+        age_days = max((datetime.combine(as_of, datetime.min.time()) - created_at).days, 0)
+        weight = 1.0 if age_days <= 7 else 0.7 if age_days <= 14 else 0.4
+        for code in {primary, *(secondary or [])}:
+            if code in error_analysis.PATTERN_LABELS:
+                recent_pattern_evidence[code] = recent_pattern_evidence.get(code, 0.0) + weight
+    for code, weight in recent_pattern_evidence.items():
+        pattern_rates[code] = max(pattern_rates.get(code, 0.0), min(weight / 3.0, 1.0))
     linked_patterns: Dict[int, List[Tuple[str, float]]] = {}
     for word_id, code, strength in db.execute(
         select(
@@ -714,7 +733,28 @@ def _selection_signal_maps(
             for code, strength in linked_patterns.get(word.id, [])
         )
         pattern_weakness[word.id] = round(max(candidates, default=0.0), 4)
-    return reviews, recent_misses, pattern_weakness
+
+    transfer_evidence: Dict[int, float] = {}
+    for word_id, evidence_count, confidence in db.execute(
+        select(
+            models.SpellingSuggestion.word_id,
+            models.SpellingSuggestion.evidence_count,
+            models.SpellingSuggestion.confidence,
+        ).where(
+            models.SpellingSuggestion.word_id.in_(word_ids),
+            or_(
+                models.SpellingSuggestion.status == "approved",
+                and_(
+                    models.SpellingSuggestion.status == "validated",
+                    models.SpellingSuggestion.validation_status == "validated",
+                ),
+            ),
+        )
+    ).all():
+        if word_id is not None:
+            evidence_score = (max(int(evidence_count or 0), 1) * float(confidence or 0.0)) / 3.0
+            transfer_evidence[word_id] = round(min(evidence_score, 1.0), 4)
+    return reviews, recent_misses, pattern_weakness, transfer_evidence
 
 
 def _selection_recency_score(
@@ -762,6 +802,8 @@ def _selection_reason(
         return "delayed audit"
     if breakdown["recent_misses"] > 0 or (review and review.incorrect_count > 0):
         return "missed spelling"
+    if breakdown["transfer_evidence"] > 0:
+        return "AI pattern transfer"
     if breakdown["pattern_weakness"] >= 1.0:
         return "weak spelling pattern"
     if review and review.due_date <= as_of:
@@ -775,6 +817,7 @@ def _selection_score(
     mode: models.SpellingSessionType,
     recent_misses: int,
     pattern_weakness: float,
+    transfer_evidence: float,
     as_of: date,
     now: datetime,
 ) -> SelectionScore:
@@ -786,6 +829,7 @@ def _selection_score(
         "miss_history": min(float(review.incorrect_count) * 0.75, 3.0) if review else 0.0,
         "recent_misses": min(float(recent_misses) * 1.5, 4.5),
         "pattern_weakness": round(pattern_weakness * 3.0, 4),
+        "transfer_evidence": round(transfer_evidence * 2.5, 4),
         "spacing_delay": 0.0,
         "usefulness": _word_usefulness_score(word),
         "stored_priority": min(max(float(word.priority_score or 0.0), 0.0), 3.0),
@@ -831,7 +875,7 @@ def _rank_words(
 ) -> List[RankedWord]:
     scoring_date = as_of or date.today()
     now = datetime.utcnow()
-    reviews, recent_misses, pattern_weakness = _selection_signal_maps(
+    reviews, recent_misses, pattern_weakness, transfer_evidence = _selection_signal_maps(
         db,
         words,
         scoring_date,
@@ -845,6 +889,7 @@ def _rank_words(
                 mode,
                 recent_misses.get(word.id, 0),
                 pattern_weakness.get(word.id, 0.0),
+                transfer_evidence.get(word.id, 0.0),
                 scoring_date,
                 now,
             ),
@@ -1655,21 +1700,38 @@ def _target_suggested_words(db: Session, limit: Optional[int] = None) -> List[mo
             )
         )
     )
-    stmt = (
-        select(models.SpellingWord)
+    rows = db.execute(
+        select(models.SpellingWord, models.SpellingSuggestion)
         .where(models.SpellingWord.is_active.is_(True))
         .where(models.SpellingWord.id.in_(suggested_ids))
         .join(models.SpellingSuggestion, models.SpellingSuggestion.word_id == models.SpellingWord.id)
-        .order_by(
-            models.SpellingSuggestion.evidence_count.desc(),
-            models.SpellingSuggestion.confidence.desc(),
-            models.SpellingWord.frequency_rank.asc().nullslast(),
-            models.SpellingWord.term.asc(),
-        )
+    ).all()
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            -int(row[1].evidence_count or 0),
+            -float(row[1].confidence or 0.0),
+            -_word_usefulness_score(row[0]),
+            row[0].frequency_rank or 999999,
+            -(row[1].last_suggested_at or datetime(1970, 1, 1)).timestamp(),
+            row[0].term,
+        ),
     )
-    if limit is not None:
-        stmt = stmt.limit(limit)
-    return list(db.scalars(stmt).all())
+    words = [word for word, _suggestion in ranked]
+    return words[:limit] if limit is not None else words
+
+
+def _exploration_source_reason(db: Session, word: models.SpellingWord, pool: str) -> str:
+    suggestion = db.scalar(
+        select(models.SpellingSuggestion).where(models.SpellingSuggestion.word_id == word.id)
+    )
+    if suggestion and suggestion.status in {"validated", "approved"}:
+        pattern = error_analysis.PATTERN_LABELS.get(suggestion.pattern_code or "", "spelling pattern")
+        evidence = int(suggestion.evidence_count or 0)
+        if evidence:
+            return f"AI transfer for {pattern.lower()} ({evidence} {'miss' if evidence == 1 else 'misses'})"
+        return "Approved AI transfer word"
+    return "Oxford core vocabulary" if pool == "oxford" else "Oxford and AI mixed pool"
 
 
 def _target_exploration_words(db: Session, pool: str = "oxford") -> List[models.SpellingWord]:
@@ -2115,6 +2177,7 @@ def get_exploration_next(
         word=schemas.SpellingWordRead.model_validate(word),
         content=_content_to_schema(word, content),
         pool=normalized_pool,
+        source_reason=_exploration_source_reason(db, word, normalized_pool),
         previous_word_id=words[index - 1].id if index > 0 else None,
         next_word_id=words[index + 1].id if index < len(words) - 1 else None,
         progress_index=index + 1,
@@ -2175,12 +2238,6 @@ def _adaptive_interval(review: models.SpellingReview, first_try_correct: bool, f
     return steps[min(idx + 1, len(steps) - 1)]
 
 
-def _pattern_from_error(word: models.SpellingWord, error_pattern: str) -> str:
-    if error_pattern in error_analysis.PATTERN_LABELS:
-        return error_pattern
-    return "letter_substitution"
-
-
 def _upsert_pattern_stats(db: Session, pattern_code: Optional[str], is_correct: bool) -> None:
     if not pattern_code:
         return
@@ -2198,6 +2255,27 @@ def _upsert_pattern_stats(db: Session, pattern_code: Optional[str], is_correct: 
     stat.recent_error_rate = round(stat.incorrect_attempts / stat.total_attempts, 4) if stat.total_attempts else 0.0
     stat.mastery_score = max(0.0, 1.0 - stat.recent_error_rate)
     stat.updated_at = datetime.utcnow()
+
+
+def _update_attempt_pattern_stats(
+    db: Session,
+    word: models.SpellingWord,
+    analysis: Optional[Dict[str, Any]],
+    is_correct: bool,
+) -> None:
+    if is_correct:
+        pattern_codes = _inferred_pattern_codes(word)
+    else:
+        pattern_codes = {
+            str(code)
+            for code in {
+                (analysis or {}).get("primary_pattern"),
+                *((analysis or {}).get("secondary_patterns") or []),
+            }
+            if code in error_analysis.PATTERN_LABELS
+        }
+    for pattern_code in pattern_codes:
+        _upsert_pattern_stats(db, pattern_code, is_correct)
 
 
 def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate) -> schemas.SpellingAttemptResult:
@@ -2428,7 +2506,7 @@ def submit_spelling_attempt(db: Session, payload: schemas.SpellingAttemptCreate)
             ) or 0
             session.is_completed = session.completed_items >= session.total_items if session.total_items else False
 
-    _upsert_pattern_stats(db, _pattern_from_error(word, pattern) if not correct else None, correct)
+    _update_attempt_pattern_stats(db, word, analysis_result, correct)
     _update_profile_after_attempt(db, points, payload.response_ms)
     _activity(
         db,

@@ -14,7 +14,6 @@ from app.backend.spelling import (
     analytics,
     attempts,
     audio,
-    dictation_grading,
     dictation_texts,
     oxford,
     sessions,
@@ -56,6 +55,16 @@ def startup_seed() -> None:
         except (SQLAlchemyError, OSError) as error:
             logger.warning(
                 "Startup seed deferred because the database is not ready (%s). Check /readiness.",
+                type(error).__name__,
+            )
+            db.rollback()
+            return
+        try:
+            audio.cleanup_audio_cache(db)
+        except (SQLAlchemyError, OSError) as error:
+            db.rollback()
+            logger.warning(
+                "Audio cache cleanup deferred because its schema or storage is not ready (%s).",
                 type(error).__name__,
             )
     finally:
@@ -330,19 +339,58 @@ def get_dictation_item_audio(
     item = db.get(models.SpellingSessionItem, item_id)
     if not item or not item.dictation_text:
         raise HTTPException(status_code=404, detail="Dictation item not found.")
-    spoken_text = item.dictation_text.content
-    if segment is not None:
-        segments = dictation_grading.split_sentence_segments(spoken_text)
-        if segment >= len(segments):
-            raise HTTPException(status_code=404, detail="Dictation segment not found.")
-        spoken_text = segments[segment]
     settings = repository.get_settings(db)
-    return audio.get_audio_response(
-        spoken_text,
-        voice=settings.tts_voice,
-        model=settings.tts_model,
-        instructions=audio.pronunciation_instructions(spoken_text, None, "dictation"),
+    try:
+        resolved = audio.resolve_audio_asset(
+            db,
+            schemas.SpellingAudioAssetResolveRequest(
+                session_item_id=item_id,
+                segment_index=segment,
+            ),
+            voice=settings.tts_voice,
+            model=settings.tts_model,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    return audio.get_audio_asset_response(
+        db,
+        resolved.asset_id,
     )
+
+
+@app.post("/spelling/audio/assets/resolve", response_model=schemas.SpellingAudioAssetRead)
+def resolve_spelling_audio_asset(
+    payload: schemas.SpellingAudioAssetResolveRequest,
+    db: Session = Depends(get_db),
+) -> schemas.SpellingAudioAssetRead:
+    settings = repository.get_settings(db)
+    try:
+        return audio.resolve_audio_asset(
+            db,
+            payload,
+            voice=settings.tts_voice,
+            model=settings.tts_model,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.get("/spelling/audio/assets/{asset_id}")
+def get_spelling_audio_asset(
+    asset_id: int,
+    force: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> Response:
+    return audio.get_audio_asset_response(db, asset_id, force=force)
+
+
+@app.post("/spelling/audio/cleanup", response_model=schemas.SpellingAudioCleanupResult)
+def cleanup_spelling_audio(
+    db: Session = Depends(get_db),
+) -> schemas.SpellingAudioCleanupResult:
+    return audio.cleanup_audio_cache(db)
 
 
 @app.get("/spelling/exploration/next", response_model=schemas.ExplorationNextOut)
@@ -543,4 +591,11 @@ def post_spelling_audio_bulk_generate(
     payload: schemas.SpellingAudioBulkGenerateRequest,
     db: Session = Depends(get_db),
 ) -> schemas.SpellingAudioBulkGenerateResult:
-    return audio.bulk_generate_audio(db, payload)
+    settings = repository.get_settings(db)
+    selected = payload.model_copy(
+        update={
+            "voice": payload.voice if "voice" in payload.model_fields_set else settings.tts_voice,
+            "model": payload.model if "model" in payload.model_fields_set else settings.tts_model,
+        }
+    )
+    return audio.bulk_generate_audio(db, selected)

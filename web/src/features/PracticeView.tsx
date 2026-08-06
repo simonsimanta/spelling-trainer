@@ -16,7 +16,7 @@ import {
   useState
 } from "react";
 
-import { playAudio, postJson } from "../api";
+import { playAudioPath, postJson, prefetchAudioPaths } from "../api";
 import type {
   AttemptResult,
   Dashboard,
@@ -60,6 +60,13 @@ export function PracticeView({
   useEffect(() => {
     if (initialSession) onInitialSessionConsumed?.();
   }, [initialSession, onInitialSessionConsumed]);
+
+  useEffect(() => {
+    if (!session) return;
+    prefetchAudioPaths(
+      session.items.slice(index, index + 3).map((item) => item.audio_url)
+    ).catch(() => undefined);
+  }, [session, index]);
 
   async function start() {
     const created = await postJson<SpellingSession>("/spelling/sessions", {
@@ -124,12 +131,12 @@ export function PracticeView({
   }
 
   async function playCurrentAudio() {
-    if (!current) return;
+    if (!current?.audio_url) {
+      setAudioError("Audio is not available for this item.");
+      return;
+    }
     try {
-      await playAudio(isDictation ? current.prompt_text : current.term, {
-        wordId: current.word_id ?? undefined,
-        mode: isDictation ? "dictation" : "word"
-      });
+      await playAudioPath(current.audio_url);
       setAudioError(null);
     } catch (err) {
       setAudioError(err instanceof Error ? err.message : "Unable to play audio");

@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.backend import models, schemas
-from app.backend.spelling import dictation_grading, dictation_texts, error_analysis
+from app.backend.spelling import audio, dictation_grading, dictation_texts, error_analysis
 from app.backend.spelling.content_quality import (
     ContentGenerationResult,
     contains_target,
@@ -2120,7 +2120,18 @@ def create_adaptive_dictation_session(
     return get_spelling_session(db, session.id)  # type: ignore[return-value]
 
 
-def _session_item_to_schema(item: models.SpellingSessionItem) -> schemas.SpellingSessionItemOut:
+def _session_item_to_schema(
+    db: Session,
+    item: models.SpellingSessionItem,
+    settings: models.AppSettings,
+) -> schemas.SpellingSessionItemOut:
+    complete_asset, segment_assets = audio.session_item_audio_assets(
+        db,
+        item,
+        voice=settings.tts_voice,
+        model=settings.tts_model,
+    )
+    complete_audio = audio.asset_read(complete_asset)
     if item.dictation_text_id and item.dictation_text:
         segments = dictation_grading.split_sentence_segments(item.dictation_text.content)
         return schemas.SpellingSessionItemOut(
@@ -2135,10 +2146,12 @@ def _session_item_to_schema(item: models.SpellingSessionItem) -> schemas.Spellin
             selection_score=item.selection_score,
             score_breakdown=dict(item.score_breakdown or {}),
             status=item.status.value,
-            audio_ready=True,
+            audio_ready=complete_audio.ready,
             dictation_level=item.dictation_text.level,
             segment_count=len(segments),
-            audio_url=f"/spelling/dictation/items/{item.id}/audio",
+            audio_asset_id=complete_asset.id,
+            audio_url=complete_audio.url,
+            audio_segment_urls=[audio.asset_url(asset) for asset in segment_assets],
         )
     term = item.word.term if item.word else item.prompt_text
     mode = item.session.session_type.value if item.session else models.SpellingMode.practice.value
@@ -2155,7 +2168,7 @@ def _session_item_to_schema(item: models.SpellingSessionItem) -> schemas.Spellin
         selection_score=item.selection_score,
         score_breakdown=dict(item.score_breakdown or {}),
         status=item.status.value,
-        audio_ready=True,
+        audio_ready=complete_audio.ready,
         choices=item.choices,
         short_meaning=(
             (item.word.short_meaning if item.word else None)
@@ -2170,6 +2183,8 @@ def _session_item_to_schema(item: models.SpellingSessionItem) -> schemas.Spellin
         chunked_form=item.word.chunked_form if item.word else None,
         phonetic_hint=item.word.phonetic_hint if item.word else None,
         difficulty_score=item.word.difficulty_score if item.word else None,
+        audio_asset_id=complete_asset.id,
+        audio_url=complete_audio.url,
     )
 
 
@@ -2264,6 +2279,8 @@ def get_spelling_session(db: Session, session_id: int) -> Optional[schemas.Spell
         [item for item in items if item.status in {models.SpellingSessionItemStatus.completed, models.SpellingSessionItemStatus.skipped}]
     )
     session.is_completed = session.completed_items >= session.total_items if session.total_items else False
+    settings = get_settings(db)
+    serialized_items = [_session_item_to_schema(db, item, settings) for item in items]
     db.commit()
     return schemas.SpellingSessionOut(
         session_id=session.id,
@@ -2271,7 +2288,7 @@ def get_spelling_session(db: Session, session_id: int) -> Optional[schemas.Spell
         total_items=session.total_items,
         completed_items=session.completed_items,
         dictation_level=session.dictation_level,
-        items=[_session_item_to_schema(item) for item in items],
+        items=serialized_items,
     )
 
 
@@ -3301,10 +3318,10 @@ def get_spelling_cost_overview(db: Session) -> schemas.SpellingCostOverview:
         estimated_feedback_input_tokens=db.scalar(select(func.coalesce(func.sum(models.SpellingFeedbackCache.estimated_input_tokens), 0))) or 0,
         estimated_feedback_output_tokens=db.scalar(select(func.coalesce(func.sum(models.SpellingFeedbackCache.estimated_output_tokens), 0))) or 0,
         generated_audio_files=db.scalar(
-            select(func.count(models.SpellingAudioManifest.id)).where(models.SpellingAudioManifest.status == "generated")
+            select(func.count(models.SpellingAudioAsset.id)).where(models.SpellingAudioAsset.status == "ready")
         ) or 0,
         failed_audio_files=db.scalar(
-            select(func.count(models.SpellingAudioManifest.id)).where(models.SpellingAudioManifest.status == "failed")
+            select(func.count(models.SpellingAudioAsset.id)).where(models.SpellingAudioAsset.status == "failed")
         ) or 0,
     )
 
@@ -3533,10 +3550,11 @@ def get_dashboard_stats(db: Session) -> schemas.DashboardStats:
         .where(models.SpellingWordContent.status.in_(["generated", "fallback", "reviewed"]))
     ) or 0
     audio_generated_words = db.scalar(
-        select(func.count(func.distinct(models.SpellingAudioManifest.word_id)))
-        .join(models.SpellingWordSource, models.SpellingWordSource.word_id == models.SpellingAudioManifest.word_id)
+        select(func.count(func.distinct(models.SpellingAudioAsset.word_id)))
+        .join(models.SpellingWordSource, models.SpellingWordSource.word_id == models.SpellingAudioAsset.word_id)
         .where(models.SpellingWordSource.source_name.in_(list(OXFORD_SOURCE_NAMES)))
-        .where(models.SpellingAudioManifest.status == "generated")
+        .where(models.SpellingAudioAsset.asset_kind == "word")
+        .where(models.SpellingAudioAsset.status == "ready")
     ) or 0
 
     return schemas.DashboardStats(

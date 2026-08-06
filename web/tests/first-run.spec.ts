@@ -154,7 +154,7 @@ test("settings shows cache status for the selected TTS variant", async ({ page }
   await page.goto("/");
   await page.getByRole("navigation").getByRole("button", { name: "Settings" }).click();
 
-  const audioCard = page.getByRole("heading", { name: "Word Audio Cache" }).locator("..");
+  const audioCard = page.getByRole("heading", { name: "Active Session Audio" }).locator("..");
   await expect(audioCard).toContainText("Alloy");
   await expect(audioCard).toContainText("gpt-4o-mini-tts");
   await expect(audioCard).toContainText("Cache checked");
@@ -375,7 +375,7 @@ test("audio failures show an actionable learner message", async ({ page }) => {
   await page.route("**/spelling/sessions", async (route) => {
     await route.fulfill({ json: diagnosticSession });
   });
-  await page.route("**/spelling/audio?*", async (route) => {
+  await page.route("**/spelling/audio/assets/1*", async (route) => {
     await route.fulfill({
       status: 503,
       json: {
@@ -391,7 +391,7 @@ test("audio failures show an actionable learner message", async ({ page }) => {
 
   await expect(
     page.getByText(
-      "Audio unavailable: Audio generation could not reach OpenAI. Check the network connection and try again."
+      "Audio unavailable: Audio could not be streamed. Check the backend connection and try again."
     )
   ).toBeVisible();
 });
@@ -416,7 +416,7 @@ test("paragraph dictation supports segment replay and layered results", async ({
   await page.route("**/spelling/sessions", async (route) => {
     await route.fulfill({ json: paragraphDictationSession });
   });
-  await page.route("**/spelling/dictation/items/4/audio**", async (route) => {
+  await page.route("**/spelling/audio/assets/**", async (route) => {
     await route.fulfill({ body: "audio", contentType: "audio/mpeg" });
   });
   const expected = "Every Monday, I write a clear schedule. This discipline helps me stay focused. I record progress in a journal.";

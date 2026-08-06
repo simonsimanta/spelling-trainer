@@ -29,6 +29,9 @@ async function mockAppShell(page: Page, dashboard = firstRunDashboard) {
   await page.route("**/readiness", (route) => route.fulfill({ json: readyEnvironment }));
   await page.route("**/dashboard", (route) => route.fulfill({ json: dashboard }));
   await page.route("**/spelling/dictation/progress", (route) => route.fulfill({ json: dictationProgress }));
+  await page.route("**/spelling/audio/assets/**", (route) => {
+    route.fulfill({ body: "audio", contentType: "audio/mpeg" });
+  });
   await page.route("**/spelling/dictation/texts**", (route) => {
     const personalText = {
       id: 16,
@@ -126,6 +129,39 @@ test("Practice covers empty and populated queues with deterministic sessions", a
   await expect(page.getByText("Question 1 of 1")).toBeVisible();
   await expect(page.getByPlaceholder("Type the spelling here...")).toBeFocused();
   expect(browserErrors).toEqual([]);
+});
+
+test("Practice prefetches the current audio item and the next two", async ({ page }) => {
+  await mockAppShell(page, dashboardWithStats({ diagnostic_ready_words: 19, practice_queue_words: 4 }));
+  const prefetched = new Set<string>();
+  await page.route("**/spelling/audio/assets/**", (route) => {
+    prefetched.add(new URL(route.request().url()).pathname);
+    route.fulfill({ body: "audio", contentType: "audio/mpeg" });
+  });
+  await page.route("**/spelling/sessions", (route) => {
+    route.fulfill({
+      json: {
+        ...practiceSession,
+        total_items: 4,
+        items: Array.from({ length: 4 }, (_, index) => ({
+          ...practiceSession.items[0],
+          session_item_id: index + 1,
+          audio_asset_id: index + 1,
+          audio_url: `/spelling/audio/assets/${index + 1}`
+        }))
+      }
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Practice" }).click();
+  await page.getByRole("button", { name: "Start Practice" }).click();
+  await expect(page.getByText("Question 1 of 4")).toBeVisible();
+  await expect.poll(() => [...prefetched].sort()).toEqual([
+    "/spelling/audio/assets/1",
+    "/spelling/audio/assets/2",
+    "/spelling/audio/assets/3"
+  ]);
 });
 
 test("Adaptive dictation hides the answer until layered grading is returned", async ({ page }) => {

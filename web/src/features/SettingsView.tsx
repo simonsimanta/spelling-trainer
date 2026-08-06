@@ -114,7 +114,7 @@ export function SettingsView({
       setResults((existing) => ({ ...existing, [kind]: result }));
       await load(settings);
       setPreview(null);
-      setMessage(`${kind === "content" ? "Word learning content" : "Word audio"} batch finished.`);
+      setMessage(`${kind === "content" ? "Word learning content" : "Session audio"} batch finished.`);
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Generation failed.");
     } finally {
@@ -200,10 +200,11 @@ export function SettingsView({
               <option value={voice} key={voice}>{title(voice)}</option>
             ))}
           </select>
+          <small>Cedar is recommended for new setups. Your selected voice remains unchanged until you save.</small>
         </label>
         <label>Batch size
           <input type="number" min={1} max={5000} value={settings.content_bulk_limit} onChange={(event) => setSettings({ ...settings, content_bulk_limit: Number(event.target.value) })} />
-          <small>Used for loading Oxford words, generating content, and generating audio. Development default is 100 words per run.</small>
+          <small>Used for loading Oxford words, generating content, and preparing active-session audio.</small>
         </label>
         <label>AI generation
           <select value={settings.ai_generation_enabled ? "enabled" : "disabled"} onChange={(event) => setSettings({ ...settings, ai_generation_enabled: event.target.value === "enabled" })}>
@@ -248,8 +249,8 @@ export function SettingsView({
       <div className="settings-section-head">
         <div>
           <p className="eyebrow">Advanced</p>
-          <h2>Content & Audio Cache</h2>
-          <p>Optional pre-generation for Oxford words. The app still works with on-demand content and audio.</p>
+          <h2>Content & Session Audio</h2>
+          <p>Word content can be prepared in batches. Audio is prepared only for active practice and dictation sessions.</p>
         </div>
       </div>
       <div className="bulk-grid">
@@ -263,12 +264,13 @@ export function SettingsView({
           onPreview={() => openPreview("content")}
         />
         <BulkCard
-          title="Word Audio Cache"
-          text="Generates cached OpenAI TTS files so Listen buttons are faster and more reliable."
+          title="Active Session Audio"
+          text="Prepares the unresolved audio assets in your current practice and dictation sessions."
           status={audioStatus}
           result={results.audio}
           running={running === "audio"}
           oxfordStatus={oxfordStatus}
+          scope="active"
           variant={{ voice: settings.tts_voice, model: settings.tts_model }}
           onPreview={() => openPreview("audio")}
         />
@@ -399,6 +401,7 @@ function BulkCard({
   running,
   oxfordStatus,
   variant,
+  scope = "oxford",
   onPreview
 }: {
   title: string;
@@ -408,17 +411,20 @@ function BulkCard({
   running: boolean;
   oxfordStatus: OxfordLoadStatus | null;
   variant?: { voice: string; model: string };
+  scope?: "oxford" | "active";
   onPreview: () => void;
 }) {
   const pending = status?.pending ?? 0;
   const ready = (status?.generated ?? 0) + (status?.fallback ?? 0) + (status?.reviewed ?? 0);
-  const loaded = oxfordStatus?.loaded_words ?? status?.total_words ?? 0;
-  const target = oxfordStatus?.target_words ?? 5000;
+  const loaded = scope === "active" ? status?.total_words ?? 0 : oxfordStatus?.loaded_words ?? status?.total_words ?? 0;
+  const target = scope === "active" ? loaded : oxfordStatus?.target_words ?? 5000;
   let buttonLabel = cardTitle.includes("Audio") ? "Preview Audio Batch" : "Preview Content Batch";
   if (!status) {
     buttonLabel = "Checking cache";
   } else if (pending === 0) {
-    buttonLabel = loaded < target ? "Load More Oxford Words First" : "All Loaded Words Cached";
+    buttonLabel = scope === "active"
+      ? loaded === 0 ? "Start a Session First" : "Active Session Audio Ready"
+      : loaded < target ? "Load More Oxford Words First" : "All Loaded Words Cached";
   }
 
   return (
@@ -433,8 +439,8 @@ function BulkCard({
         </div>
       ) : null}
       <div className="bulk-status-row">
-        <span><b>{ready} / {loaded}</b> ready / loaded</span>
-        <span><b>{pending}</b> pending among loaded</span>
+        <span><b>{ready} / {loaded}</b> {scope === "active" ? "ready assets" : "ready / loaded"}</span>
+        <span><b>{pending}</b> {scope === "active" ? "pending" : "pending among loaded"}</span>
         <span><b>{status?.failed ?? 0}</b> failed</span>
       </div>
       {!variant && ((status?.fallback ?? 0) > 0 || (status?.reviewed ?? 0) > 0) ? (
@@ -474,18 +480,18 @@ function BulkPreviewPanel({
         <div className="section-head">
           <div>
             <p className="eyebrow">Confirm Batch</p>
-            <h2>{kind === "content" ? "Generate word learning content" : "Generate word audio cache"}</h2>
+            <h2>{kind === "content" ? "Generate word learning content" : "Prepare active session audio"}</h2>
           </div>
           <button className="secondary" disabled={running} onClick={onCancel}>Cancel</button>
         </div>
         <p>
-          This will process up to {preview.will_process} words from a batch size of {preview.limit}.
+          This will process up to {preview.will_process} {kind === "content" ? "words" : "audio assets"} from a batch size of {preview.limit}.
           {kind === "content" && preview.ai_generation_enabled === false
             ? " AI generation is disabled, so deterministic fallback content will be saved without API calls."
             : " This may use OpenAI API quota."}
         </p>
         <div className="preview-grid">
-          <span><b>{preview.total_words}</b>Total words</span>
+          <span><b>{preview.total_words}</b>{kind === "content" ? "Total words" : "Active assets"}</span>
           <span><b>{preview.generated}</b>Generated</span>
           {kind === "content" ? <span><b>{preview.fallback ?? 0}</b>Fallback</span> : null}
           {kind === "content" ? <span><b>{preview.reviewed ?? 0}</b>Reviewed</span> : null}

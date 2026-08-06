@@ -42,7 +42,7 @@ class AppSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     theme: Mapped[str] = mapped_column(String(40), default="light", nullable=False)
-    tts_voice: Mapped[str] = mapped_column(String(40), default="alloy", nullable=False)
+    tts_voice: Mapped[str] = mapped_column(String(40), default="cedar", nullable=False)
     tts_model: Mapped[str] = mapped_column(String(80), default="gpt-4o-mini-tts", nullable=False)
     ai_model: Mapped[str] = mapped_column(String(80), default="gpt-4o-mini", nullable=False)
     ai_generation_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -658,6 +658,43 @@ class SpellingAudioManifest(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     word = relationship("SpellingWord", back_populates="audio_manifests")
+
+
+class SpellingAudioAsset(Base):
+    __tablename__ = "spelling_audio_assets"
+    __table_args__ = (UniqueConstraint("fingerprint", name="uq_spelling_audio_asset_fingerprint"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    asset_kind: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    word_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_words.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    dictation_text_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_dictation_texts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    session_item_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_session_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    segment_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    locale: Mapped[str] = mapped_column(String(10), default="en-GB", nullable=False)
+    mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    voice: Mapped[str] = mapped_column(String(40), nullable=False)
+    model: Mapped[str] = mapped_column(String(80), nullable=False)
+    audio_format: Mapped[str] = mapped_column(String(20), default="mp3", nullable=False)
+    instructions: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    instructions_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    pronunciation_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False, index=True)
+    file_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    byte_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    access_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_accessed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class SpellingFeedbackCache(Base):

@@ -9,7 +9,8 @@ import {
   Mic,
   PenLine,
   Settings as SettingsIcon,
-  Trophy
+  Trophy,
+  Volume2
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -188,6 +189,12 @@ export default function App() {
                 onRefreshReadiness={refreshReadiness}
               />
             )}
+            {(["diagnostic", "exploration", "practice", "dictation", "wordLists", "settings"] as ViewKey[]).includes(view) ? (
+              <div className="ai-voice-disclosure" role="note">
+                <Volume2 size={15} />
+                <span>Audio is AI-generated and is not a human voice.</span>
+              </div>
+            ) : null}
           </>
         )}
       </main>

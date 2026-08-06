@@ -623,7 +623,8 @@ def test_oxford_loader_status_and_batch_import(monkeypatch) -> None:
     content_status = client.get("/spelling/content/bulk-status").json()
     audio_status = client.get("/spelling/audio/bulk-status").json()
     assert content_status["total_words"] == 6
-    assert audio_status["total_words"] == 6
+    assert audio_status["total_words"] == 0
+    assert audio_status["pending"] == 0
 
 
 def test_exploration_returns_oxford_words_in_order_and_respects_known_action() -> None:
@@ -860,7 +861,8 @@ def test_practice_and_dictation_sessions_create_expected_items() -> None:
     assert dictation_payload["items"][0]["term"] == "Dictation"
     assert dictation_payload["items"][0]["prompt_text"] == "Listen to the complete text and type what you hear."
     assert dictation_payload["items"][0]["segment_count"] == 1
-    assert dictation_payload["items"][0]["audio_url"].endswith("/audio")
+    assert dictation_payload["items"][0]["audio_url"].startswith("/spelling/audio/assets/")
+    assert len(dictation_payload["items"][0]["audio_segment_urls"]) == 1
 
 
 def test_diagnostic_session_creates_personal_practice_priority() -> None:
@@ -1742,6 +1744,11 @@ def test_content_and_audio_bulk_generation(monkeypatch, tmp_path) -> None:
         "generate_tts_audio",
         lambda text, voice="alloy", model="gpt-4o-mini-tts", instructions="": b"bulk-mp3",
     )
+    session = client.post(
+        "/spelling/sessions",
+        json={"session_type": "diagnostic", "target_size": 1},
+    )
+    assert session.status_code == 200
     result = client.post("/spelling/audio/bulk-generate", json={"limit": 2})
     assert result.status_code == 200
     assert result.json()["generated"] >= 1
@@ -1794,22 +1801,36 @@ def test_disabled_ai_fallback_and_manual_content_review(monkeypatch, tmp_path) -
 
     generated = []
 
-    def fake_audio(text: str, voice: str, model: str, instructions: str = "") -> bytes:
-        generated.append((text, instructions))
-        return b"reviewed-audio"
+    class FakeStream:
+        status_code = 200
+
+        def iter_content(self, chunk_size: int):
+            del chunk_size
+            yield b"reviewed-audio"
+
+        def close(self):
+            return None
+
+    def fake_stream(spec):
+        generated.append((spec.text, spec.instructions))
+        return FakeStream()
 
     monkeypatch.setattr(audio, "audio_cache_dir", lambda: tmp_path)
-    monkeypatch.setattr(audio, "generate_tts_audio", fake_audio)
-    playback = client.get(
-        "/spelling/audio",
-        params={"text": term, "word_id": word_id, "force": True},
+    monkeypatch.setattr(audio, "_open_tts_stream", fake_stream)
+    resolved = client.post(
+        "/spelling/audio/assets/resolve",
+        json={"word_id": word_id, "force": True},
     )
+    assert resolved.status_code == 200
+    playback = client.get(resolved.json()["url"])
     assert playback.status_code == 200
     assert "Stress the first syllable" in generated[0][1]
-    status = client.get("/spelling/audio/bulk-status").json()
-    assert status["generated"] >= 1
-    assert status["voice"] == "alloy"
-    assert status["model"] == "gpt-4o-mini-tts"
+    with SessionLocal() as db:
+        asset = db.get(models.SpellingAudioAsset, resolved.json()["asset_id"])
+        assert asset is not None
+        assert asset.status == "ready"
+        assert asset.voice == "cedar"
+        assert asset.model == "gpt-4o-mini-tts"
 
 
 def test_cached_audio_endpoint(monkeypatch, tmp_path) -> None:
@@ -1820,7 +1841,7 @@ def test_cached_audio_endpoint(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         audio,
         "audio_cache_path",
-        lambda text, voice, model, instructions="": cache_file,
+        lambda text, voice, model, instructions="", **_kwargs: cache_file,
     )
 
     audio_response = client.get("/spelling/audio", params={"text": "definitely"})
@@ -1907,6 +1928,12 @@ def test_bulk_audio_status_and_legacy_manifests_are_variant_specific(monkeypatch
 
     monkeypatch.setattr(audio, "audio_cache_dir", lambda: tmp_path)
     monkeypatch.setattr(audio, "generate_tts_audio", fake_audio)
+
+    session = client.post(
+        "/spelling/sessions",
+        json={"session_type": "diagnostic", "target_size": 1},
+    )
+    assert session.status_code == 200
 
     coral_result = client.post(
         "/spelling/audio/bulk-generate",

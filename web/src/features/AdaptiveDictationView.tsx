@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { CSSProperties, FormEvent, useEffect, useState } from "react";
 
-import { getJson, playAudioPath, postJson } from "../api";
+import { getJson, playAudioPath, postJson, prefetchAudioPaths } from "../api";
 import type {
   Dashboard,
   DictationProgress,
@@ -66,6 +66,17 @@ export function AdaptiveDictationView({
   const result = current ? results[current.session_item_id] : null;
   const complete = Boolean(session && index >= session.items.length);
 
+  useEffect(() => {
+    if (!session) return;
+    const queued = session.items.slice(index, index + 3);
+    prefetchAudioPaths([
+      queued[0]?.audio_url,
+      ...(queued[0]?.audio_segment_urls ?? []),
+      queued[1]?.audio_url,
+      queued[2]?.audio_url
+    ]).catch(() => undefined);
+  }, [session, index]);
+
   async function start() {
     setLoading(true);
     setError(null);
@@ -88,8 +99,11 @@ export function AdaptiveDictationView({
   }
 
   async function play(segment?: number) {
-    if (!current?.audio_url) return;
-    const path = segment == null ? current.audio_url : `${current.audio_url}?segment=${segment}`;
+    const path = segment == null ? current?.audio_url : (current?.audio_segment_urls ?? [])[segment];
+    if (!path) {
+      setAudioError("Audio is not available for this part of the dictation.");
+      return;
+    }
     try {
       await playAudioPath(path);
       setPlayCount((value) => value + 1);

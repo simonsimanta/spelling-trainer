@@ -371,6 +371,7 @@ class ExplorationNextOut(BaseModel):
     word: SpellingWordRead
     content: SpellingWordContentRead
     pool: str = "oxford"
+    source_reason: Optional[str] = None
     previous_word_id: Optional[int] = None
     next_word_id: Optional[int] = None
     progress_index: int

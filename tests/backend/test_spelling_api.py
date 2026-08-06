@@ -675,6 +675,7 @@ def test_exploration_can_use_llm_suggested_word_pool() -> None:
     suggested_payload = suggested_next.json()
     assert suggested_payload["pool"] == "suggested"
     assert suggested_payload["word"]["term"] == "conscientious"
+    assert suggested_payload["source_reason"] == "Approved AI transfer word"
 
     wrong = client.post(
         "/spelling/attempts",
@@ -693,6 +694,40 @@ def test_exploration_can_use_llm_suggested_word_pool() -> None:
     )
     assert practice.status_code == 200
     assert "conscientious" in {item["term"] for item in practice.json()["items"]}
+
+
+def test_ai_pool_orders_words_by_evidence_then_confidence() -> None:
+    _seed_core_words()
+    db = SessionLocal()
+    try:
+        suggestions = [
+            ("conscientious", 3, 0.8, datetime.utcnow() - timedelta(days=2)),
+            ("miscellaneous", 2, 0.99, datetime.utcnow()),
+            ("rhythmical", 3, 0.7, datetime.utcnow() - timedelta(days=1)),
+        ]
+        for term, evidence_count, confidence, suggested_at in suggestions:
+            word = repository.create_spelling_word(
+                db,
+                schemas.SpellingWordCreate(term=term, level="suggested", source="llm"),
+            )
+            db.add(
+                models.SpellingSuggestion(
+                    word_id=word.id,
+                    term=word.term,
+                    reason="Validated transfer word",
+                    status="validated",
+                    validation_status="validated",
+                    evidence_count=evidence_count,
+                    confidence=confidence,
+                    last_suggested_at=suggested_at,
+                )
+            )
+        db.commit()
+
+        ordered = repository._target_suggested_words(db)
+        assert [word.term for word in ordered] == ["conscientious", "rhythmical", "miscellaneous"]
+    finally:
+        db.close()
 
 
 def test_bulk_generation_preview_endpoints_return_safe_counts() -> None:
@@ -968,6 +1003,7 @@ def test_explainable_priority_score_ranks_high_risk_word() -> None:
         "lapses",
         "recent_misses",
         "pattern_weakness",
+        "transfer_evidence",
         "spacing_delay",
         "usefulness",
         "recency",
@@ -983,6 +1019,65 @@ def test_explainable_priority_score_ranks_high_risk_word() -> None:
     assert plan_payload["recommended_mode"] == "practice"
     assert plan_payload["mode_scores"]["practice"] > plan_payload["mode_scores"]["diagnostic"]
     assert plan_payload["recommended_reason"]
+
+
+def test_recent_analysis_and_transfer_evidence_affect_selection_scores() -> None:
+    _seed_core_words()
+    client = _client()
+    db = SessionLocal()
+    try:
+        knowledge = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "knowledge"))
+        assert knowledge is not None
+        knowledge_id = knowledge.id
+    finally:
+        db.close()
+
+    miss = client.post(
+        "/spelling/attempts",
+        json={"word_id": knowledge_id, "attempt_text": "nowledge", "mode": "diagnostic"},
+    )
+    assert miss.status_code == 200
+
+    db = SessionLocal()
+    try:
+        silent_word = repository.create_spelling_word(
+            db,
+            schemas.SpellingWordCreate(term="knight", level="personal", source="manual"),
+        )
+        neutral_word = repository.create_spelling_word(
+            db,
+            schemas.SpellingWordCreate(term="calendar", level="personal", source="manual"),
+        )
+        transfer_word = repository.create_spelling_word(
+            db,
+            schemas.SpellingWordCreate(term="conscientious", level="suggested", source="llm"),
+        )
+        db.add(
+            models.SpellingSuggestion(
+                word_id=transfer_word.id,
+                term=transfer_word.term,
+                reason="Transfer the same suffix pattern.",
+                status="validated",
+                validation_status="validated",
+                pattern_code="suffix_confusion",
+                evidence_count=3,
+                confidence=0.9,
+                last_suggested_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+
+        ranked = repository._rank_words(
+            db,
+            [neutral_word, silent_word, transfer_word],
+            models.SpellingSessionType.practice,
+        )
+        by_term = {item.word.term: item.score for item in ranked}
+        assert by_term["knight"].breakdown["pattern_weakness"] > by_term["calendar"].breakdown["pattern_weakness"]
+        assert by_term["conscientious"].breakdown["transfer_evidence"] > 0
+        assert by_term["conscientious"].reason == "AI pattern transfer"
+    finally:
+        db.close()
 
 
 def test_stale_due_review_does_not_starve_diagnostic_coverage() -> None:
@@ -1444,6 +1539,46 @@ def test_deterministic_error_analysis_golden_set(
     assert 0.0 <= analysis["confidence"] <= 1.0
 
 
+def test_word_pattern_codes_cover_teachable_word_features() -> None:
+    assert error_analysis.word_pattern_codes("receive") == {"ie_ei_confusion"}
+    assert "double_consonant" in error_analysis.word_pattern_codes("accommodation")
+    assert "silent_letter" in error_analysis.word_pattern_codes("knowledge")
+    assert "suffix_confusion" in error_analysis.word_pattern_codes("stationary")
+    assert "homophone_confusion" in error_analysis.word_pattern_codes("stationary")
+
+
+def test_correct_attempt_contributes_success_to_pattern_accuracy() -> None:
+    _seed_core_words()
+    client = _client()
+    db = SessionLocal()
+    try:
+        word = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == "receive"))
+        assert word is not None
+        word_id = word.id
+    finally:
+        db.close()
+
+    result = client.post(
+        "/spelling/attempts",
+        json={"word_id": word_id, "attempt_text": "receive", "mode": "diagnostic"},
+    )
+    assert result.status_code == 200
+
+    db = SessionLocal()
+    try:
+        stat = db.scalar(
+            select(models.SpellingUserPatternStat)
+            .join(models.SpellingPattern)
+            .where(models.SpellingPattern.code == "ie_ei_confusion")
+        )
+        assert stat is not None
+        assert stat.total_attempts == 1
+        assert stat.incorrect_attempts == 0
+        assert stat.recent_error_rate == 0.0
+    finally:
+        db.close()
+
+
 def test_miss_analysis_persists_validated_pool_without_due_review() -> None:
     _seed_core_words()
     client = _client()
@@ -1489,8 +1624,16 @@ def test_miss_analysis_persists_validated_pool_without_due_review() -> None:
             db.scalar(select(models.SpellingReview).where(models.SpellingReview.word_id == item.id)) is None
             for item in newly_created
         )
+        candidate_terms = {item.term for item in newly_created}
     finally:
         db.close()
+
+    practice = client.post(
+        "/spelling/sessions",
+        json={"session_type": "practice", "target_size": 10, "exercise_type": "mixed"},
+    )
+    assert practice.status_code == 200
+    assert candidate_terms.isdisjoint({item["term"] for item in practice.json()["items"]})
 
 
 def test_structured_ai_analysis_is_cached_for_repeated_miss(monkeypatch: pytest.MonkeyPatch) -> None:

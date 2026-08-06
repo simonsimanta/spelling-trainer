@@ -196,7 +196,7 @@ export function ExplorationView({
             </div>
             <div>
               <h2>{revealed ? result?.term : "What word do you hear?"}</h2>
-              <p>{revealed ? "Review the spelling and learning details before moving on." : poolDescription}</p>
+              <p>{revealed ? data.source_reason : poolDescription}</p>
             </div>
             <div className="meaning-strip">
               <span>Meaning</span>

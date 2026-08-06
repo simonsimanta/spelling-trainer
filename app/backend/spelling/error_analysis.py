@@ -59,6 +59,23 @@ CURATED_TRANSFER_WORDS = {
 }
 
 
+def word_pattern_codes(term: str) -> set[str]:
+    """Return spelling patterns a correctly spelled word can exercise."""
+    word = normalize_word(term)
+    codes: set[str] = set()
+    if "ie" in word or "ei" in word:
+        codes.add("ie_ei_confusion")
+    if any(left == right and left not in VOWELS for left, right in zip(word, word[1:])):
+        codes.add("double_consonant")
+    if word in SILENT_LETTER_WORDS or any(part in word for part in ("kn", "wr", "mb", "gh")):
+        codes.add("silent_letter")
+    if any(word.endswith(suffix) for suffix in SUFFIXES):
+        codes.add("suffix_confusion")
+    if any(word in group for group in HOMOPHONE_GROUPS):
+        codes.add("homophone_confusion")
+    return codes
+
+
 def normalize_word(value: str) -> str:
     return "".join(char for char in value.lower().strip() if char.isalpha())
 

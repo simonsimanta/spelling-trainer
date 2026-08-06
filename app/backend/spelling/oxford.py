@@ -17,7 +17,12 @@ OXFORD_TARGET_WORDS = 5000
 OXFORD_3000 = "oxford_3000"
 OXFORD_5000 = "oxford_5000"
 OXFORD_SOURCE_NAMES = {OXFORD_3000, OXFORD_5000}
-WORD_RE = re.compile(r"[A-Za-z][A-Za-z'\-]{1,}")
+CEFR_RE = re.compile(r"\b(?:A1|A2|B1|B2|C1|C2)\b")
+PART_OF_SPEECH_RE = re.compile(
+    r"\s(?:n\.|v\.|adj\.|adv\.|prep\.|conj\.|pron\.|det\.|exclam\.|"
+    r"number\b|modal\s+v\.|auxiliary\s+v\.)",
+    re.IGNORECASE,
+)
 BLOCKED_TOKENS = {
     "oxford",
     "word",
@@ -67,22 +72,37 @@ def normalize_term(term: str) -> str:
     return cleaned
 
 
+def extract_terms_from_text(text: str) -> list[str]:
+    terms: list[str] = []
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.split())
+        if not line or not CEFR_RE.search(line):
+            continue
+        part_of_speech = PART_OF_SPEECH_RE.search(line)
+        if not part_of_speech:
+            continue
+        entry = line[: part_of_speech.start()].strip()
+        entry = re.sub(r"\s*\([^)]*\)\s*", " ", entry).strip()
+        if " " in entry or "," in entry:
+            continue
+        term = normalize_term(entry)
+        if (
+            len(term) < 2
+            or len(term) > 32
+            or term in BLOCKED_TOKENS
+            or not term.replace("-", "").isalpha()
+        ):
+            continue
+        terms.append(term)
+    return terms
+
+
 def extract_terms_from_pdf(pdf_path: Path) -> list[str]:
     reader = PdfReader(str(pdf_path))
     terms: list[str] = []
     for page in reader.pages:
         text = page.extract_text() or ""
-        for match in WORD_RE.findall(text):
-            term = normalize_term(match)
-            if len(term) < 2:
-                continue
-            if term in BLOCKED_TOKENS:
-                continue
-            if term.isdigit():
-                continue
-            if len(term) > 32:
-                continue
-            terms.append(term)
+        terms.extend(extract_terms_from_text(text))
     return terms
 
 

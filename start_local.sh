@@ -18,10 +18,15 @@ else
 fi
 
 mkdir -p data
+LOCAL_DB_URL="${APP_DATABASE_URL:-sqlite:///./data/spelling_trial.db}"
+
+echo ""
+echo -e "${BLUE}Preparing durable local trial database${NC}"
+APP_DATABASE_URL="$LOCAL_DB_URL" .venv/bin/python -m alembic upgrade head
 
 echo ""
 echo -e "${BLUE}Starting FastAPI Backend on http://127.0.0.1:8000${NC}"
-.venv/bin/python -m uvicorn app.backend.api:app --host 127.0.0.1 --port 8000 --reload &
+APP_DATABASE_URL="$LOCAL_DB_URL" .venv/bin/python -m uvicorn app.backend.api:app --host 127.0.0.1 --port 8000 --reload &
 BACKEND_PID=$!
 
 echo "Waiting for backend..."

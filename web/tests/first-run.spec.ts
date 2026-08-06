@@ -37,6 +37,128 @@ test("first-run dashboard exposes Diagnostic and starts a diagnostic session", a
   await expect(page.getByPlaceholder("Type the spelling here...")).toBeFocused();
 });
 
+test("diagnostic shows progress while audio and spelling checks are prepared", async ({ page }) => {
+  let releaseSession: () => void = () => undefined;
+  let markSessionRequested: () => void = () => undefined;
+  const sessionGate = new Promise<void>((resolve) => { releaseSession = resolve; });
+  const sessionRequested = new Promise<void>((resolve) => { markSessionRequested = resolve; });
+  let releaseAudio: () => void = () => undefined;
+  let markAudioRequested: () => void = () => undefined;
+  const audioGate = new Promise<void>((resolve) => { releaseAudio = resolve; });
+  const audioRequested = new Promise<void>((resolve) => { markAudioRequested = resolve; });
+  let releaseAttempt: () => void = () => undefined;
+  let markAttemptRequested: () => void = () => undefined;
+  const attemptGate = new Promise<void>((resolve) => { releaseAttempt = resolve; });
+  const attemptRequested = new Promise<void>((resolve) => { markAttemptRequested = resolve; });
+
+  await page.addInitScript(() => {
+    class MockAudio {
+      play() { return Promise.resolve(); }
+    }
+    Object.defineProperty(window, "Audio", { configurable: true, value: MockAudio });
+  });
+  await page.route("**/dashboard", async (route) => {
+    await route.fulfill({ json: firstRunDashboard });
+  });
+  await page.route("**/spelling/sessions*", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    markSessionRequested();
+    await sessionGate;
+    await route.fulfill({ json: diagnosticSession });
+  });
+  await page.route("**/spelling/audio/assets/1*", async (route) => {
+    markAudioRequested();
+    await audioGate;
+    await route.fulfill({ body: "audio", contentType: "audio/mpeg" });
+  });
+  await page.route("**/spelling/attempts*", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    markAttemptRequested();
+    await attemptGate;
+    await route.fulfill({
+      json: {
+        attempt_id: 1,
+        word_id: 1,
+        term: "definitely",
+        attempt_text: "definitely",
+        is_correct: true,
+        points_awarded: 10,
+        error_pattern: null,
+        next_due_date: "2026-08-07",
+        llm_feedback: "Correct.",
+        error_analysis: null,
+        chunk_hint: "de-fin-ite-ly",
+        mnemonic: "Remember the finite in definitely.",
+        example_sentence: "She definitely checked the spelling.",
+        diff_json: null,
+        sentence_diff_json: null,
+        target_spelling_correct: null,
+        sentence_complete: null,
+        sentence_similarity: null,
+        chunk_feedback: "de-fin-ite-ly",
+        phonetic_feedback: null,
+        forced_correction_required: false,
+        allow_next: true,
+        mastery_state: "known_provisional",
+        mastery_state_before: "new",
+        mastery_state_after: "known_provisional",
+        retry_prompt: null,
+        retry_index: 0,
+        skip_available: false,
+        skip_after_retries: 2
+      }
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Diagnostic" }).click();
+  const startAction = page.getByRole("button", { name: "Start Diagnostic" }).click();
+  await sessionRequested;
+  await expect(page.getByRole("button", { name: "Starting..." })).toBeDisabled();
+  releaseSession();
+  await startAction;
+
+  await expect(page.getByText("Question 1 of 1")).toBeVisible();
+  await audioRequested;
+  await expect(page.getByRole("button", { name: "Preparing word audio" })).toBeDisabled();
+  releaseAudio();
+  await expect(page.getByRole("button", { name: "Hear Again" })).toBeEnabled();
+
+  await page.getByPlaceholder("Type the spelling here...").fill("definitely");
+  const checkAction = page.getByRole("button", { name: "Check Answer" }).click();
+  await attemptRequested;
+  await expect(page.getByRole("button", { name: "Checking..." })).toBeDisabled();
+  releaseAttempt();
+  await checkAction;
+  await expect(page.getByText("Correct. +10 points")).toBeVisible();
+});
+
+test("diagnostic start failures keep the learner in a recoverable state", async ({ page }) => {
+  await page.route("**/dashboard", async (route) => {
+    await route.fulfill({ json: firstRunDashboard });
+  });
+  await page.route("**/spelling/sessions*", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({ status: 503, json: { detail: "The local database is unavailable." } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Diagnostic" }).click();
+  await page.getByRole("button", { name: "Start Diagnostic" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("The local database is unavailable.");
+  await expect(page.getByRole("button", { name: "Start Diagnostic" })).toBeEnabled();
+});
+
 test("progress guides a first-session learner instead of showing empty analytics", async ({ page }) => {
   await page.route("**/dashboard", async (route) => {
     await route.fulfill({ json: firstRunDashboard });

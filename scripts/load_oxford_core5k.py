@@ -2,64 +2,18 @@
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, List, Set, Tuple
 
 from dotenv import load_dotenv
-from pypdf import PdfReader
 from sqlalchemy import func, select
 
-from app.backend import models, repository, schemas
+from app.backend import models, repository
 from app.backend.db import SessionLocal
+from app.backend.spelling.oxford import extract_terms_from_pdf
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
-
-
-WORD_RE = re.compile(r"[A-Za-z][A-Za-z'\-]{1,}")
-BLOCKED_TOKENS = {
-    "oxford",
-    "word",
-    "list",
-    "cefr",
-    "american",
-    "english",
-    "british",
-    "levels",
-    "level",
-    "guide",
-    "copyright",
-}
-
-
-def normalize_term(term: str) -> str:
-    cleaned = term.lower().strip("-'")
-    cleaned = re.sub(r"[^a-z\-']", "", cleaned)
-    cleaned = cleaned.replace("'", "")
-    cleaned = cleaned.strip("-")
-    if cleaned.endswith("-"):
-        cleaned = cleaned[:-1]
-    return cleaned
-
-
-def extract_terms_from_pdf(pdf_path: Path) -> List[str]:
-    reader = PdfReader(str(pdf_path))
-    terms: List[str] = []
-    for page in reader.pages:
-        text = page.extract_text() or ""
-        for match in WORD_RE.findall(text):
-            term = normalize_term(match)
-            if len(term) < 2:
-                continue
-            if term in BLOCKED_TOKENS:
-                continue
-            if term.isdigit():
-                continue
-            if len(term) > 32:
-                continue
-            terms.append(term)
-    return terms
 
 
 def unique_preserve_order(values: Iterable[str]) -> List[str]:
@@ -107,11 +61,14 @@ def ingest_source(
         existing = db.scalar(select(models.SpellingWord).where(models.SpellingWord.term == term))
         created = False
         if not existing:
-            created_word = repository.create_spelling_word(
-                db,
-                schemas.SpellingWordCreate(term=term, level="core5k", source="oxford"),
+            existing = models.SpellingWord(
+                term=term,
+                level="core5k",
+                source="oxford",
+                mastery_state="new",
             )
-            existing = created_word
+            db.add(existing)
+            db.flush()
             created = True
 
         repository.upsert_spelling_word_source(

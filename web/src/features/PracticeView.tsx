@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ListChecks,
+  Loader2,
   Mic,
   PenLine,
   Sparkles,
@@ -16,7 +17,7 @@ import {
   useState
 } from "react";
 
-import { playAudioPath, postJson, prefetchAudioPaths } from "../api";
+import { playAudioPath, postJson, prefetchAudioPath, prefetchAudioPaths } from "../api";
 import type {
   AttemptResult,
   Dashboard,
@@ -51,6 +52,11 @@ export function PracticeView({
   const [itemResults, setItemResults] = useState<Record<number, AttemptResult>>({});
   const [correction, setCorrection] = useState("");
   const [audioError, setAudioError] = useState<string | null>(null);
+  const [audioPreparing, setAudioPreparing] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const current = session?.items[index];
   const complete = session ? index >= session.items.length : false;
   const currentResult = current ? itemResults[current.session_item_id] : null;
@@ -62,56 +68,101 @@ export function PracticeView({
   }, [initialSession, onInitialSessionConsumed]);
 
   useEffect(() => {
-    if (!session) return;
+    const audioUrl = session?.items[index]?.audio_url;
+    if (!session || !audioUrl) {
+      setAudioPreparing(false);
+      return;
+    }
+    let cancelled = false;
+    setAudioPreparing(true);
+    setAudioError(null);
+    prefetchAudioPath(audioUrl)
+      .catch((error) => {
+        if (!cancelled) {
+          setAudioError(error instanceof Error ? error.message : "Unable to prepare audio");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAudioPreparing(false);
+      });
     prefetchAudioPaths(
-      session.items.slice(index, index + 3).map((item) => item.audio_url)
+      session.items.slice(index + 1, index + 3).map((item) => item.audio_url)
     ).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [session, index]);
 
   async function start() {
-    const created = await postJson<SpellingSession>("/spelling/sessions", {
-      session_type: mode,
-      target_size: isDictation ? 10 : isDiagnostic ? 20 : 8,
-      exercise_type: "mixed"
-    });
-    setSession(created);
-    setIndex(0);
-    setAttempt("");
-    setItemResults({});
-    setCorrection("");
-    setAudioError(null);
+    if (starting) return;
+    setStarting(true);
+    setStartError(null);
+    try {
+      const created = await postJson<SpellingSession>("/spelling/sessions", {
+        session_type: mode,
+        target_size: isDictation ? 10 : isDiagnostic ? 20 : 8,
+        exercise_type: "mixed"
+      });
+      setSession(created);
+      setIndex(0);
+      setAttempt("");
+      setItemResults({});
+      setCorrection("");
+      setAudioError(null);
+      setSubmitError(null);
+    } catch (error) {
+      setStartError(error instanceof Error ? error.message : "Unable to start this session.");
+    } finally {
+      setStarting(false);
+    }
   }
 
   async function submit(value?: string) {
     if (!current?.word_id) return;
-    if (currentResult) return;
+    if (currentResult || submitting) return;
     const text = value ?? attempt;
     if (!text.trim()) return;
-    const submitted = await postJson<AttemptResult>("/spelling/attempts", {
-      session_id: session?.session_id,
-      session_item_id: current.session_item_id,
-      word_id: current.word_id,
-      attempt_text: text,
-      mode,
-      response_ms: 1000,
-      used_hint: false,
-      used_reveal: false
-    });
-    setItemResults((existing) => ({ ...existing, [current.session_item_id]: submitted }));
-    setAttempt("");
-    await onRefresh();
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      const submitted = await postJson<AttemptResult>("/spelling/attempts", {
+        session_id: session?.session_id,
+        session_item_id: current.session_item_id,
+        word_id: current.word_id,
+        attempt_text: text,
+        mode,
+        response_ms: 1000,
+        used_hint: false,
+        used_reveal: false
+      });
+      setItemResults((existing) => ({ ...existing, [current.session_item_id]: submitted }));
+      setAttempt("");
+      void onRefresh().catch(() => undefined);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Unable to check this spelling.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function submitCorrection(event: FormEvent) {
     event.preventDefault();
-    if (!current || !currentResult?.attempt_id || !correction.trim()) return;
-    await postJson(`/spelling/attempts/${currentResult.attempt_id}/correct`, { correction_text: correction });
-    setCorrection("");
-    setItemResults((existing) => ({
-      ...existing,
-      [current.session_item_id]: { ...currentResult, forced_correction_required: false, allow_next: true }
-    }));
-    await onRefresh();
+    if (!current || !currentResult?.attempt_id || !correction.trim() || submitting) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await postJson(`/spelling/attempts/${currentResult.attempt_id}/correct`, { correction_text: correction });
+      setCorrection("");
+      setItemResults((existing) => ({
+        ...existing,
+        [current.session_item_id]: { ...currentResult, forced_correction_required: false, allow_next: true }
+      }));
+      void onRefresh().catch(() => undefined);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Unable to submit this correction.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   function next() {
@@ -119,6 +170,7 @@ export function PracticeView({
     setAttempt("");
     setCorrection("");
     setAudioError(null);
+    setSubmitError(null);
     setIndex((value) => value + 1);
   }
 
@@ -127,6 +179,7 @@ export function PracticeView({
     setAttempt("");
     setCorrection("");
     setAudioError(null);
+    setSubmitError(null);
     setIndex((value) => Math.max(value - 1, 0));
   }
 
@@ -135,11 +188,15 @@ export function PracticeView({
       setAudioError("Audio is not available for this item.");
       return;
     }
+    if (audioPreparing) return;
+    setAudioPreparing(true);
     try {
       await playAudioPath(current.audio_url);
       setAudioError(null);
     } catch (err) {
       setAudioError(err instanceof Error ? err.message : "Unable to play audio");
+    } finally {
+      setAudioPreparing(false);
     }
   }
 
@@ -161,10 +218,13 @@ export function PracticeView({
               ? "Diagnostic tests useful words without correction blocking, then sends misses into Practice."
               : "Practice uses only words from your mistake and review queue."}
           </p>
-          <button className="large-action" onClick={start}>
-            {isDictation ? "Start Dictation" : isDiagnostic ? "Start Diagnostic" : "Start Practice"} <ChevronRight size={18} />
+          <button className="large-action" disabled={starting} onClick={start}>
+            {starting ? <Loader2 className="spin" size={18} /> : null}
+            {starting ? "Starting..." : isDictation ? "Start Dictation" : isDiagnostic ? "Start Diagnostic" : "Start Practice"}
+            {!starting ? <ChevronRight size={18} /> : null}
           </button>
         </div>
+        {startError ? <div className="banner error" role="alert">{startError}</div> : null}
         {isDictation ? <DictationLibrary /> : null}
       </section>
     );
@@ -196,7 +256,11 @@ export function PracticeView({
         <CheckCircle2 size={54} />
         <h1>Session complete</h1>
         <p>You finished {session.total_items} items.</p>
-        <button onClick={start}>Start another session</button>
+        <button disabled={starting} onClick={start}>
+          {starting ? <Loader2 className="spin" size={18} /> : null}
+          {starting ? "Starting..." : "Start another session"}
+        </button>
+        {startError ? <div className="banner error" role="alert">{startError}</div> : null}
       </section>
     );
   }
@@ -245,10 +309,13 @@ export function PracticeView({
               item={current}
               attempt={attempt}
               audioError={audioError}
-              disabled={Boolean(currentResult)}
+              audioPreparing={audioPreparing}
+              disabled={Boolean(currentResult) || submitting}
               playAudio={playCurrentAudio}
               setAttempt={setAttempt}
               submit={submit}
+              submitError={submitError}
+              submitting={submitting}
             />
 
             {currentResult ? <Feedback result={currentResult} /> : null}
@@ -264,7 +331,11 @@ export function PracticeView({
                   value={correction}
                   onChange={(event) => setCorrection(event.target.value)}
                 />
-                <button>Submit correction</button>
+                <button disabled={submitting}>
+                  {submitting ? <Loader2 className="spin" size={18} /> : null}
+                  {submitting ? "Submitting..." : "Submit correction"}
+                </button>
+                {submitError ? <div className="banner error" role="alert">{submitError}</div> : null}
               </form>
             ) : null}
 
@@ -311,14 +382,16 @@ export function PracticeView({
           <span className="pill">{index + 1} / {session.items.length}</span>
         </div>
 
-        <Exercise attempt={attempt} disabled={Boolean(currentResult)} setAttempt={setAttempt} submit={submit} />
+        <Exercise attempt={attempt} disabled={Boolean(currentResult) || submitting} setAttempt={setAttempt} submit={submit} submitting={submitting} />
 
         <div className="audio-row">
-          <button className="listen-button" onClick={playCurrentAudio}>
-            <Volume2 size={24} /> Listen
+          <button className="listen-button" disabled={audioPreparing} onClick={playCurrentAudio}>
+            {audioPreparing ? <Loader2 className="spin" size={24} /> : <Volume2 size={24} />}
+            {audioPreparing ? "Preparing audio..." : "Listen"}
           </button>
         </div>
         {audioError ? <div className="banner warn">Audio unavailable: {audioError}</div> : null}
+        {submitError ? <div className="banner error" role="alert">{submitError}</div> : null}
 
         {currentResult ? <Feedback result={currentResult} /> : null}
 
@@ -333,7 +406,10 @@ export function PracticeView({
               value={correction}
               onChange={(event) => setCorrection(event.target.value)}
             />
-            <button>Submit correction</button>
+            <button disabled={submitting}>
+              {submitting ? <Loader2 className="spin" size={18} /> : null}
+              {submitting ? "Submitting..." : "Submit correction"}
+            </button>
           </form>
         ) : null}
 
@@ -364,12 +440,14 @@ function Exercise({
   attempt,
   disabled,
   setAttempt,
-  submit
+  submit,
+  submitting
 }: {
   attempt: string;
   disabled: boolean;
   setAttempt: (value: string) => void;
   submit: (value?: string) => Promise<void>;
+  submitting: boolean;
 }) {
   return (
     <div className="exercise-card">
@@ -385,7 +463,10 @@ function Exercise({
         value={attempt}
         onChange={(event) => setAttempt(event.target.value)}
       />
-      <button disabled={disabled} onClick={() => submit()}>Submit</button>
+      <button disabled={disabled} onClick={() => submit()}>
+        {submitting ? <Loader2 className="spin" size={18} /> : null}
+        {submitting ? "Checking..." : "Submit"}
+      </button>
     </div>
   );
 }
@@ -394,18 +475,24 @@ function PracticeExercise({
   item,
   attempt,
   audioError,
+  audioPreparing,
   disabled,
   playAudio,
   setAttempt,
-  submit
+  submit,
+  submitError,
+  submitting
 }: {
   item: SessionItem;
   attempt: string;
   audioError: string | null;
+  audioPreparing: boolean;
   disabled: boolean;
   playAudio: () => Promise<void>;
   setAttempt: (value: string) => void;
   submit: (value?: string) => Promise<void>;
+  submitError: string | null;
+  submitting: boolean;
 }) {
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -416,8 +503,8 @@ function PracticeExercise({
     <form className="practice-card" onSubmit={handleSubmit}>
       <div className="practice-audio-stage">
         <div className="waveform blue"><i /><i /><i /><i /><i /></div>
-        <button className="audio-orb" type="button" onClick={playAudio} aria-label="Play word audio">
-          <Volume2 size={34} />
+        <button className="audio-orb" disabled={audioPreparing} type="button" onClick={playAudio} aria-label={audioPreparing ? "Preparing word audio" : "Play word audio"}>
+          {audioPreparing ? <Loader2 className="spin" size={34} /> : <Volume2 size={34} />}
         </button>
         <div className="waveform blue"><i /><i /><i /><i /><i /></div>
       </div>
@@ -448,13 +535,16 @@ function PracticeExercise({
         onChange={(event) => setAttempt(event.target.value)}
       />
       {audioError ? <div className="banner warn">Audio unavailable: {audioError}</div> : null}
+      {submitError ? <div className="banner error" role="alert">{submitError}</div> : null}
 
       <div className="practice-card-actions">
-        <button className="secondary" type="button" onClick={playAudio}>
-          <Volume2 size={18} /> Hear Again
+        <button className="secondary" disabled={audioPreparing} type="button" onClick={playAudio}>
+          {audioPreparing ? <Loader2 className="spin" size={18} /> : <Volume2 size={18} />}
+          {audioPreparing ? "Preparing audio..." : "Hear Again"}
         </button>
         <button disabled={disabled || !attempt.trim()} type="submit">
-          Check Answer
+          {submitting ? <Loader2 className="spin" size={18} /> : null}
+          {submitting ? "Checking..." : "Check Answer"}
         </button>
       </div>
     </form>
@@ -596,7 +686,7 @@ export function Feedback({ result }: { result: AttemptResult }) {
           </span>
           {result.error_analysis.transfer_words.length ? (
             <div>
-              <b>AI practice pool</b>
+              <b>Related practice words</b>
               <p>{result.error_analysis.transfer_words.map((item) => item.term).join(", ")}</p>
             </div>
           ) : null}

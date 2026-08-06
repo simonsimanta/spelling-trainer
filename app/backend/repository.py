@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import requests
 from sqlalchemy import Integer, and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.backend import models, schemas
 from app.backend.spelling import audio, dictation_grading, dictation_texts, error_analysis
@@ -72,6 +72,90 @@ COMMON_CONFUSION_WORDS = [
     "accommodation",
     "magnificent",
 ]
+
+DIAGNOSTIC_EXCLUDED_TERMS = {
+    "adj",
+    "adv",
+    "an",
+    "and",
+    "are",
+    "article",
+    "as",
+    "at",
+    "auxiliary",
+    "be",
+    "been",
+    "being",
+    "but",
+    "by",
+    "conjunction",
+    "det",
+    "did",
+    "do",
+    "does",
+    "exclam",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "he",
+    "her",
+    "hers",
+    "him",
+    "his",
+    "how",
+    "if",
+    "in",
+    "indefinite",
+    "into",
+    "is",
+    "it",
+    "its",
+    "me",
+    "modal",
+    "most",
+    "my",
+    "no",
+    "not",
+    "noun",
+    "of",
+    "on",
+    "or",
+    "our",
+    "ours",
+    "preposition",
+    "pronoun",
+    "she",
+    "so",
+    "than",
+    "that",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "to",
+    "verb",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "will",
+    "with",
+    "you",
+    "your",
+}
 
 
 @dataclass(frozen=True)
@@ -644,6 +728,27 @@ def _word_usefulness_score(word: models.SpellingWord) -> float:
     return round(score, 4)
 
 
+def _diagnostic_spelling_value(word: models.SpellingWord) -> float:
+    term = error_analysis.normalize_word(word.term)
+    patterns = error_analysis.word_pattern_codes(term)
+    length_score = min(max(len(term) - 4, 0) * 0.1, 0.8)
+    pattern_score = min(len(patterns) * 0.35, 1.05)
+    confusion_score = 0.75 if term in COMMON_CONFUSION_WORDS else 0.0
+    short_simple_penalty = 0.35 if len(term) <= 5 and not patterns else 0.0
+    return round(max(0.0, length_score + pattern_score + confusion_score - short_simple_penalty), 4)
+
+
+def _is_diagnostic_candidate(word: models.SpellingWord) -> bool:
+    term = error_analysis.normalize_word(word.term)
+    if term in COMMON_CONFUSION_WORDS:
+        return True
+    return bool(
+        len(term) >= 4
+        and term not in DIAGNOSTIC_EXCLUDED_TERMS
+        and term == word.term.lower().replace("'", "").replace("-", "")
+    )
+
+
 def _inferred_pattern_codes(word: models.SpellingWord) -> set[str]:
     return error_analysis.word_pattern_codes(word.term)
 
@@ -843,6 +948,11 @@ def _selection_score(
             if mode == models.SpellingSessionType.diagnostic and word.diagnostic_status == "untested"
             else 0.0
         ),
+        "spelling_value": (
+            _diagnostic_spelling_value(word)
+            if mode == models.SpellingSessionType.diagnostic
+            else 0.0
+        ),
     }
     if review:
         lapse_count = max(review.lapse_count, 1 if word.mastery_state == "lapse" else 0)
@@ -956,7 +1066,11 @@ def _diagnostic_candidate_words(db: Session, target_size: int, level: str = "all
     words = [
         word
         for word in db.scalars(stmt).all()
-        if word.id not in attempted_ids and word.id not in actionable_review_ids
+        if (
+            word.id not in attempted_ids
+            and word.id not in actionable_review_ids
+            and _is_diagnostic_candidate(word)
+        )
     ]
     return _rank_words(db, words, models.SpellingSessionType.diagnostic, today)[:target_size]
 
@@ -2124,12 +2238,12 @@ def _session_item_to_schema(
     db: Session,
     item: models.SpellingSessionItem,
     settings: models.AppSettings,
+    prepared_audio: Optional[
+        Tuple[models.SpellingAudioAsset, List[models.SpellingAudioAsset]]
+    ] = None,
 ) -> schemas.SpellingSessionItemOut:
-    complete_asset, segment_assets = audio.session_item_audio_assets(
-        db,
-        item,
-        voice=settings.tts_voice,
-        model=settings.tts_model,
+    complete_asset, segment_assets = prepared_audio or audio.session_item_audio_assets(
+        db, item, voice=settings.tts_voice, model=settings.tts_model
     )
     complete_audio = audio.asset_read(complete_asset)
     if item.dictation_text_id and item.dictation_text:
@@ -2273,14 +2387,30 @@ def get_spelling_session(db: Session, session_id: int) -> Optional[schemas.Spell
     items = db.scalars(
         select(models.SpellingSessionItem)
         .where(models.SpellingSessionItem.session_id == session.id)
+        .options(
+            joinedload(models.SpellingSessionItem.session),
+            joinedload(models.SpellingSessionItem.word).joinedload(
+                models.SpellingWord.content_cache
+            ),
+            joinedload(models.SpellingSessionItem.dictation_text),
+        )
         .order_by(models.SpellingSessionItem.order_index.asc())
-    ).all()
+    ).unique().all()
     session.completed_items = len(
         [item for item in items if item.status in {models.SpellingSessionItemStatus.completed, models.SpellingSessionItemStatus.skipped}]
     )
     session.is_completed = session.completed_items >= session.total_items if session.total_items else False
     settings = get_settings(db)
-    serialized_items = [_session_item_to_schema(db, item, settings) for item in items]
+    prepared_audio = audio.prepare_session_audio_assets(
+        db,
+        list(items),
+        voice=settings.tts_voice,
+        model=settings.tts_model,
+    )
+    serialized_items = [
+        _session_item_to_schema(db, item, settings, prepared_audio[item.id])
+        for item in items
+    ]
     db.commit()
     return schemas.SpellingSessionOut(
         session_id=session.id,
@@ -2429,6 +2559,7 @@ def submit_spelling_attempt(
     *,
     dictation_submission_id: Optional[int] = None,
     commit: bool = True,
+    defer_ai: bool = False,
 ) -> schemas.SpellingAttemptResult:
     word = db.get(models.SpellingWord, payload.word_id)
     if not word:
@@ -2468,13 +2599,17 @@ def submit_spelling_attempt(
         pattern = "none"
         feedback = "Correct. Say the word once, then recall it again after a delay."
     else:
-        analysis_result = error_analysis.cached_analysis(
-            db,
-            word,
-            feedback_attempt_text,
-            model=settings.ai_model,
-            locale=settings.english_variant,
-            enabled=settings.ai_generation_enabled,
+        analysis_result = (
+            error_analysis.immediate_analysis(word.term, feedback_attempt_text)
+            if defer_ai and payload.mode != models.SpellingMode.dictation.value
+            else error_analysis.cached_analysis(
+                db,
+                word,
+                feedback_attempt_text,
+                model=settings.ai_model,
+                locale=settings.english_variant,
+                enabled=settings.ai_generation_enabled,
+            )
         )
         pattern = analysis_result["primary_pattern"]
         feedback = error_analysis.feedback_text(analysis_result)

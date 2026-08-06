@@ -450,7 +450,10 @@ def post_spelling_attempts(
     db: Session = Depends(get_db),
 ) -> schemas.SpellingAttemptResult:
     try:
-        return attempts.submit_attempt(db, payload)
+        result = attempts.submit_attempt(db, payload, defer_ai=True)
+        if not result.is_correct and payload.mode != models.SpellingMode.dictation.value:
+            attempts.schedule_enrichment(result.attempt_id)
+        return result
     except ValueError as err:
         raise HTTPException(status_code=404, detail=str(err))
 

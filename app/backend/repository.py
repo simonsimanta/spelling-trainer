@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.backend import models, schemas
-from app.backend.spelling import error_analysis
+from app.backend.spelling import dictation_texts, error_analysis
 from app.backend.spelling.content_quality import (
     ContentGenerationResult,
     contains_target,
@@ -168,6 +168,7 @@ DEFAULT_ACHIEVEMENTS = [
 def seed_defaults(db: Session) -> None:
     ensure_app_defaults(db)
     seed_spelling_defaults(db)
+    dictation_texts.seed_dictation_texts(db)
 
 
 def ensure_app_defaults(db: Session) -> None:

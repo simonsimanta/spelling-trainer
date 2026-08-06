@@ -26,6 +26,47 @@ function captureBrowserErrors(page: Page): string[] {
 async function mockAppShell(page: Page, dashboard = firstRunDashboard) {
   await page.route("**/readiness", (route) => route.fulfill({ json: readyEnvironment }));
   await page.route("**/dashboard", (route) => route.fulfill({ json: dashboard }));
+  await page.route("**/spelling/dictation/texts**", (route) => {
+    const personalText = {
+      id: 16,
+      title: "Concert preparation",
+      content: "The careful musician checked every instrument before tonight's important concert.",
+      source_type: "personal",
+      level: "sentence",
+      locale: "en-GB",
+      status: "reviewed",
+      word_count: 10,
+      sentence_count: 1,
+      quality_warnings: [],
+      allow_ai_adaptation: true,
+      adapted_from_id: null,
+      targets: [{ word_id: null, term: "instrument", order_index: 0 }],
+      use_count: 0,
+      last_used_at: null,
+      created_at: "2026-08-06T12:00:00Z"
+    };
+    if (route.request().method() === "POST") {
+      route.fulfill({ json: personalText });
+      return;
+    }
+    route.fulfill({
+      json: {
+        items: [
+          {
+            ...personalText,
+            id: 1,
+            title: "Posting the letter",
+            content: "I will definitely check the address before posting the letter.",
+            source_type: "curated",
+            allow_ai_adaptation: false,
+            targets: [{ word_id: 1, term: "definitely", order_index: 0 }]
+          }
+        ],
+        total: 1,
+        counts: { sentence: 1, passage: 0, paragraph: 0, personal: 0 }
+      }
+    });
+  });
 }
 
 test("Dashboard renders without browser errors", async ({ page }) => {
@@ -106,6 +147,25 @@ test("Dictation covers empty and populated queues with deterministic sessions", 
   await expect(page.getByRole("heading", { name: "Sentence Dictation" })).toBeVisible();
   await expect(page.getByText("1 / 1")).toBeVisible();
   await expect(page.getByPlaceholder("Type the sentence here...")).toBeVisible();
+  expect(browserErrors).toEqual([]);
+});
+
+test("Dictation library imports personal text", async ({ page }) => {
+  const browserErrors = captureBrowserErrors(page);
+  await mockAppShell(page);
+
+  await page.goto("/");
+  await page.getByRole("navigation").getByRole("button", { name: "Dictation" }).click();
+  await expect(page.getByRole("heading", { name: "Text library" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Posting the letter" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Add personal text" }).click();
+  await page.getByLabel("Title").fill("Concert preparation");
+  await page.getByRole("textbox", { name: "Text", exact: true }).fill("The careful musician checked every instrument before tonight's important concert.");
+  await page.getByLabel("Target spellings").fill("instrument");
+  await page.getByRole("button", { name: "Add text" }).click();
+
+  await expect(page.getByText("Personal text added.")).toBeVisible();
   expect(browserErrors).toEqual([]);
 });
 

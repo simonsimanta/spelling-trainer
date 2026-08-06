@@ -317,7 +317,9 @@ class SpellingSessionItem(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("spelling_sessions.id", ondelete="CASCADE"), nullable=False)
-    word_id: Mapped[Optional[int]] = mapped_column(ForeignKey("spelling_words.id", ondelete="CASCADE"), nullable=True)
+    word_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("spelling_words.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     dictation_text_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("spelling_dictation_texts.id", ondelete="RESTRICT"), nullable=True, index=True
     )
@@ -379,10 +381,12 @@ class SpellingAttempt(Base):
     session_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("spelling_sessions.id", ondelete="SET NULL"),
         nullable=True,
+        index=True,
     )
     session_item_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("spelling_session_items.id", ondelete="SET NULL"),
         nullable=True,
+        index=True,
     )
     dictation_submission_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("spelling_dictation_submissions.id", ondelete="SET NULL"),
@@ -416,7 +420,7 @@ class SpellingDictationProgress(Base):
     current_level: Mapped[str] = mapped_column(String(20), default="sentence", nullable=False)
     previous_level: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     last_evaluated_session_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("spelling_sessions.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("spelling_sessions.id", ondelete="SET NULL"), nullable=True, index=True
     )
     level_started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     level_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
